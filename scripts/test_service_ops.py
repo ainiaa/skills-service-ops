@@ -815,6 +815,13 @@ class DatabaseRoutingTests(unittest.TestCase):
 
 
 class SetupTests(unittest.TestCase):
+    def test_readme_includes_a_scenario_based_usage_guide(self):
+        readme = (Path(__file__).parent.parent / "README.md").read_text(encoding="utf-8")
+        for section in ("## 快速开始", "## 常用场景", "### 查询日志", "### TraceId 排障",
+                        "### 数据验证与 Excel 导出", "### 工单预检与提交", "## 常见问题"):
+            with self.subTest(section=section):
+                self.assertIn(section, readme)
+
     def test_configuration_template_points_to_the_runtime_configuration_path(self):
         template = (Path(__file__).parent.parent / "config" / "settings.yaml.example").read_text(encoding="utf-8")
         self.assertIn("~/.service-ops/config.yaml", template)
