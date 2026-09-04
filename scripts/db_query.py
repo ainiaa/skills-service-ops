@@ -25,7 +25,7 @@ def query_test(sql, database, config):
     test_db = config.get("test_db", {})
     if not test_db.get("host"):
         raise ValueError("测试库 host 未配置。")
-    password = paas.get_test_db_password()
+    password = paas.get_test_db_password(config=config)
     if not password:
         raise ValueError("未找到测试库密码。")
     if not test_db.get("user"):

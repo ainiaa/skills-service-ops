@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """PaaS 配置、凭据和只读查询的共享实现。"""
 import json
-import os
 import platform
 import re
 import ssl
@@ -40,13 +39,6 @@ def validate_profile_name(profile):
 def set_active_profile(profile):
     global _ACTIVE_PROFILE
     _ACTIVE_PROFILE = validate_profile_name(profile) if profile else "default"
-
-
-def profile_env_name(base, profile=None):
-    name = validate_profile_name(profile or active_profile())
-    if name == "default":
-        return base
-    return "{}_{}".format(base, name.upper().replace("-", "_"))
 
 
 def load_config(profile=None):
@@ -95,15 +87,21 @@ def _keychain_value(account, profile=None):
     return result.stdout.strip() if result.returncode == 0 else ""
 
 
-def get_cookie(profile=None):
-    name = profile or active_profile()
-    return _keychain_value("paas-cookie", name) or os.environ.get(profile_env_name("PAAS_COOKIE", name), "").strip()
+def _configured_secret(config, section, field):
+    value = config.get(section, {}).get(field)
+    return value.strip() if isinstance(value, str) else ""
 
 
-def get_test_db_password(profile=None):
+def get_cookie(profile=None, config=None):
     name = profile or active_profile()
-    return (_keychain_value("test-db-password", name)
-            or os.environ.get(profile_env_name("TEST_DB_PASSWORD", name), "").strip())
+    return _keychain_value("paas-cookie", name) or _configured_secret(
+        config if config is not None else {}, "paas", "cookie")
+
+
+def get_test_db_password(profile=None, config=None):
+    name = profile or active_profile()
+    return _keychain_value("test-db-password", name) or _configured_secret(
+        config if config is not None else {}, "test_db", "password")
 
 
 def is_mysql_line_comment(sql, index):
@@ -345,9 +343,9 @@ def query(config, service, env, sql, limit=1000):
     """Execute the documented fixed PaaS result envelope: [{columnList, rows}]."""
     import requests
 
-    cookie = get_cookie()
+    cookie = get_cookie(config=config)
     if not cookie:
-        raise ValueError("未找到 PaaS Cookie；请写入 macOS Keychain 或设置 PAAS_COOKIE。")
+        raise ValueError("未找到 PaaS Cookie；请写入 macOS Keychain 或私有配置文件。")
     paas_config = config.get("paas", {})
     url = paas_config.get("query_api_url", "")
     if not url:

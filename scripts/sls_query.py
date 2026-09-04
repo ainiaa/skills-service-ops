@@ -122,8 +122,8 @@ def truncation_metadata(log_count, limit, page=None, offset=None):
 def get_credentials(profile, config=None):
     profile = profile or paas.active_profile()
     settings = (config if config is not None else paas.load_config(profile)).get("sls", {})
-    access_key = settings.get("access_key")
-    access_secret = settings.get("access_secret")
+    access_key = paas._keychain_value("sls-ak", profile) or settings.get("access_key")
+    access_secret = paas._keychain_value("sls-sk", profile) or settings.get("access_secret")
     if not isinstance(access_key, str) or not access_key.strip() or not isinstance(access_secret, str) or not access_secret.strip():
         raise ValueError("当前 profile 未配置 SLS access_key/access_secret。")
     return access_key.strip(), access_secret.strip()

@@ -39,7 +39,7 @@ sls_query.py --raw / --jsonl
 
 `sls_query.py --dry-run` 仅解析 profile、查询、日志库和时间范围，输出固定 JSON 查询计划；该分支在加载配置、读取凭据和创建 SLS 客户端之前返回。外部 Agent 运行器将触发结果写成 JSONL，内置 `eval_contract.py` 对照公开契约判定 action/route，并将重复或未知用例视为无效输入而失败。
 
-变更 SQL 的 `UPDATE` 与 `DELETE` 必须包含顶层 `WHERE`，子查询中的 `WHERE` 不得作为安全条件；SQL 拆分识别引号和注释，避免注释内分号破坏预检。仅当 `--` 后接 ASCII 空白或控制字符时才按 MySQL 行注释处理；MySQL 可执行注释 `/*!...*/` 一律拒绝，不能被剥离后参与只读或工单判断。只读 SELECT 拒绝直接或反引号引用的 `GET_LOCK`、`RELEASE_LOCK`、`SLEEP`、`BENCHMARK`、`LOAD_FILE` 与 `LAST_INSERT_ID`，也拒绝 `INTO @var`、`@var :=`，避免锁和会话状态变更、资源消耗或服务端文件读取。DDL/DML 和 approve/execute/recall 的预检都将精确请求体写入权限为 `600` 的用户私有计划记录，并绑定 resolved profile、对应 PaaS API base 与契约；执行时必须从该记录读取，且当前参数、profile 与目标完全一致。确认时先验证 PaaS Cookie，随后 token 一次性消费并立即将落盘计划重写为仅含消费时间戳的标记；提交失败也保留已消费状态，必须先核对 PaaS 工单。标记保留七天后在下一次预检时清理。SLS 的 project、region/endpoint、AK、SK 只从权限为 `600` 的私有配置文件或显式 CLI 路由参数读取；未传 `--profile` 时固定使用 `default`，不得从环境变量覆盖。Keychain 读取超时为 10 秒，错误或超时后只回退到同一 profile 的 PaaS Cookie 和测试库密码环境变量。SLS SDK 请求超时为 30 秒；macOS/Unix 主线程以进程级 60 秒定时器中断整次 SLS 查询，TraceId 采集子进程超时为 60 秒，不支持该定时器的平台拒绝真实查询；SLS SDK 依赖约束为已验证的 0.9.x。SLS 真实查询的单次输出上限为 1000 行，超过 1 小时须先计划并以 `--allow-wide-range` 显式确认。非 default profile 的 PaaS 与测试库环境变量使用 profile 后缀，避免回退到其他 profile 的凭据。评测器同时校验触发和行为契约，并拒绝重复 case ID 或非对象结果行。
+变更 SQL 的 `UPDATE` 与 `DELETE` 必须包含顶层 `WHERE`，子查询中的 `WHERE` 不得作为安全条件；SQL 拆分识别引号和注释，避免注释内分号破坏预检。仅当 `--` 后接 ASCII 空白或控制字符时才按 MySQL 行注释处理；MySQL 可执行注释 `/*!...*/` 一律拒绝，不能被剥离后参与只读或工单判断。只读 SELECT 拒绝直接或反引号引用的 `GET_LOCK`、`RELEASE_LOCK`、`SLEEP`、`BENCHMARK`、`LOAD_FILE` 与 `LAST_INSERT_ID`，也拒绝 `INTO @var`、`@var :=`，避免锁和会话状态变更、资源消耗或服务端文件读取。DDL/DML 和 approve/execute/recall 的预检都将精确请求体写入权限为 `600` 的用户私有计划记录，并绑定 resolved profile、对应 PaaS API base 与契约；执行时必须从该记录读取，且当前参数、profile 与目标完全一致。确认时先验证 PaaS Cookie，随后 token 一次性消费并立即将落盘计划重写为仅含消费时间戳的标记；提交失败也保留已消费状态，必须先核对 PaaS 工单。标记保留七天后在下一次预检时清理。全部配置和凭据仅从权限为 `600` 的私有配置文件或 macOS Keychain 读取；Keychain 的同 profile 凭据优先，配置文件兜底，未传 `--profile` 时固定使用 `default`，不得从环境变量覆盖。SLS SDK 请求超时为 30 秒；macOS/Unix 主线程以进程级 60 秒定时器中断整次 SLS 查询，TraceId 采集子进程超时为 60 秒，不支持该定时器的平台拒绝真实查询；SLS SDK 依赖约束为已验证的 0.9.x。SLS 真实查询的单次输出上限为 1000 行，超过 1 小时须先计划并以 `--allow-wide-range` 显式确认。评测器同时校验触发和行为契约，并拒绝重复 case ID 或非对象结果行。
 
 ## 4. 就绪检查
 
@@ -64,12 +64,12 @@ sls_query.py --raw / --jsonl
 
 ## 5. 安全约束
 
-- Cookie、AK/SK、测试库密码仅从 Keychain 或运行时环境变量读取。
+- Cookie、AK/SK、测试库密码从 Keychain 或权限为 `600` 的私有配置文件读取；Keychain 优先。
 - 生产查询、导出和工单必须获得明确授权；生产导出直接执行命令即为调用者确认，不增加二次 token。
 - 测试库账号必须以最小权限限制在每个服务已配置的 test_database；代码拒绝未配置该库名的直连。
 - Excel 导出中的字符串若以公式前缀开头，必须作为文本写入，避免在办公软件中执行公式。
 - 导出 SQL 的内联参数与文件参数互斥；导出结果行数不得超过已批准的 SQL LIMIT，行结构无效时拒绝写入；Excel 先写同目录临时文件，再原子替换目标文件。
-- profile 名称在配置、Keychain 和环境变量路径中使用同一受限格式；分页续取使用与请求方式一致的 page 或 offset 指针。
+- profile 名称在配置和 Keychain 路径中使用同一受限格式；分页续取使用与请求方式一致的 page 或 offset 指针。
 - 任何采集失败不得被转换为空结果。
 
 ## 自审记录

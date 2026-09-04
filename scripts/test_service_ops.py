@@ -676,25 +676,31 @@ class DatabaseRoutingTests(unittest.TestCase):
             ("configured-project", "cn-hangzhou", None),
         )
 
-    def test_keychain_timeout_is_bounded_and_falls_back_to_environment(self):
+    def test_keychain_timeout_is_bounded_and_falls_back_to_private_config(self):
         with patch.object(paas.subprocess, "run", side_effect=subprocess.TimeoutExpired("security", 10)) as run, \
-             patch.dict(os.environ, {"PAAS_COOKIE": "environment-cookie"}, clear=True):
-            self.assertEqual(paas.get_cookie(), "environment-cookie")
+             patch.dict(os.environ, {"PAAS_COOKIE": "environment-cookie"}, clear=False):
+            self.assertEqual(paas.get_cookie(config={"paas": {"cookie": "configured-cookie"}}), "configured-cookie")
         self.assertEqual(run.call_args.kwargs["timeout"], paas.KEYCHAIN_TIMEOUT_SECONDS)
 
     def test_get_cookie_uses_the_requested_profile_keychain_entry(self):
         with patch.object(paas, "_keychain_value", return_value="cookie") as keychain_value:
-            self.assertEqual(paas.get_cookie("regional"), "cookie")
+            self.assertEqual(paas.get_cookie("regional", {"paas": {"cookie": "configured-cookie"}}), "cookie")
         keychain_value.assert_called_once_with("paas-cookie", "regional")
 
-    def test_get_cookie_keeps_environment_fallback_profile_scoped(self):
+    def test_test_database_keychain_password_takes_precedence_over_private_config(self):
+        with patch.object(paas, "_keychain_value", return_value="keychain-password"):
+            self.assertEqual(paas.get_test_db_password("regional", {"test_db": {"password": "configured-password"}}),
+                             "keychain-password")
+
+    def test_paas_credentials_fall_back_to_the_resolved_private_config(self):
         with patch.object(paas, "_keychain_value", return_value=""), \
-             patch.dict(os.environ, {"PAAS_COOKIE": "default-cookie", "PAAS_COOKIE_REGIONAL": "regional-cookie"}, clear=True):
-            self.assertEqual(paas.get_cookie(), "default-cookie")
-            self.assertEqual(paas.get_cookie("regional"), "regional-cookie")
+             patch.dict(os.environ, {"PAAS_COOKIE": "environment-cookie", "TEST_DB_PASSWORD": "environment-password"}, clear=False):
+            self.assertEqual(paas.get_cookie(config={"paas": {"cookie": "configured-cookie"}}), "configured-cookie")
+            self.assertEqual(paas.get_test_db_password(config={"test_db": {"password": "configured-password"}}),
+                             "configured-password")
         with patch.object(paas, "_keychain_value", return_value=""), \
-             patch.dict(os.environ, {"PAAS_COOKIE": "default-cookie"}, clear=True):
-            self.assertEqual(paas.get_cookie("regional"), "")
+             patch.dict(os.environ, {"PAAS_COOKIE": "environment-cookie"}, clear=False):
+            self.assertEqual(paas.get_cookie(config={"paas": {}}), "")
 
     def test_paas_query_uses_the_caller_limit(self):
         class RequestException(Exception):
@@ -878,7 +884,7 @@ class SetupTests(unittest.TestCase):
              patch.object(setup, "missing_dependencies", return_value=[]):
             self.assertEqual(setup.check_readiness("paas", "regional"), [])
         load_config.assert_called_once_with("regional")
-        get_cookie.assert_called_once_with("regional")
+        get_cookie.assert_called_once_with("regional", config)
 
     def test_check_readiness_reports_missing_configuration_and_credentials(self):
         with patch.object(paas, "load_config", side_effect=ValueError("配置缺失")), \
@@ -1226,21 +1232,26 @@ class LocalSlsQueryTests(unittest.TestCase):
     def test_sls_query_reads_all_sls_settings_from_private_config(self):
         config = {"sls": {"project": "log-project", "region": "ap-southeast-1",
                            "access_key": "config-ak", "access_secret": "config-sk"}}
-        with patch.dict(os.environ, {"SLS_LOG_AK": "environment-ak", "SLS_LOG_SK": "environment-sk"}, clear=False):
+        with patch.object(sls_query.paas, "_keychain_value", return_value=""), \
+             patch.dict(os.environ, {"SLS_LOG_AK": "environment-ak", "SLS_LOG_SK": "environment-sk"}, clear=False):
             self.assertEqual(sls_query.get_credentials(None, config), ("config-ak", "config-sk"))
             self.assertEqual(sls_query.resolve_connection(None, None, None, None, config),
                              ("log-project", "ap-southeast-1", None))
 
+    def test_sls_keychain_credentials_take_precedence_over_private_config(self):
+        config = {"sls": {"access_key": "config-ak", "access_secret": "config-sk"}}
+        with patch.object(sls_query.paas, "_keychain_value", side_effect=["keychain-ak", "keychain-sk"]):
+            self.assertEqual(sls_query.get_credentials("regional", config), ("keychain-ak", "keychain-sk"))
+
     def test_sls_query_rejects_environment_credential_fallback(self):
-        with patch.dict(os.environ, {"SLS_LOG_AK": "environment-ak", "SLS_LOG_SK": "environment-sk"}, clear=False):
+        with patch.object(sls_query.paas, "_keychain_value", return_value=""), \
+             patch.dict(os.environ, {"SLS_LOG_AK": "environment-ak", "SLS_LOG_SK": "environment-sk"}, clear=False):
             with self.assertRaisesRegex(ValueError, "SLS access_key/access_secret"):
                 sls_query.get_credentials("default", {"sls": {}})
 
     def test_sls_query_uses_the_active_profile_when_no_route_is_given(self):
         with patch.object(sls_query.paas, "active_profile", return_value="regional"):
             self.assertEqual(sls_query.resolve_profile(None, None), "regional")
-        self.assertEqual(paas.profile_env_name("PAAS_COOKIE", "default"), "PAAS_COOKIE")
-        self.assertEqual(paas.profile_env_name("PAAS_COOKIE", "regional"), "PAAS_COOKIE_REGIONAL")
 
     def test_sls_query_falls_back_to_full_text_when_indexes_are_unavailable(self):
         self.assertEqual(
@@ -1263,7 +1274,7 @@ class LocalSlsQueryTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             paas.validate_profile_name("dev.us")
         with self.assertRaises(ValueError):
-            paas.profile_env_name("PAAS_COOKIE", "dev.us")
+            paas.set_active_profile("dev.us")
 
 
 class CustomProfileTests(unittest.TestCase):

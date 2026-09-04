@@ -7,7 +7,7 @@
 ```bash
 python3 -m pip install -r requirements.lock
 python3 scripts/setup.py --init
-# 填写 ~/.service-ops/config.yaml（不填写凭据）
+# 填写 ~/.service-ops/config.yaml（包括 Keychain 未提供的凭据）
 python3 scripts/setup.py --check --capability sls
 ```
 
@@ -17,7 +17,7 @@ python3 scripts/setup.py --check --capability sls
 
 `setup.py --init` 会从 [配置模板](config/settings.yaml.example) 创建权限为 `600` 的 `~/.service-ops/config.yaml`。填写 SLS 的 project/region/endpoint/AK/SK、服务的生产 group 与测试库、PaaS 契约和可选脱敏规则；PaaS 查询成功响应固定为 `[{"columnList": [...], "rows": [...]}]`。
 
-SLS 配置（含 AK/SK）只从该私有文件读取。PaaS Cookie 与测试库密码不写配置文件：默认 profile 使用 Keychain 或 `PAAS_COOKIE`、`TEST_DB_PASSWORD`；其他 profile 使用 `_<PROFILE>` 环境变量后缀。
+全部配置与凭据均可填写在该私有文件中；macOS Keychain 的同 profile 凭据优先，配置文件作为兜底。当前不读取任何环境变量。
 
 ## 常用场景
 
@@ -78,11 +78,11 @@ python3 scripts/db_apply.py --env prod --service orders \
 
 ### 使用 profile
 
-默认使用 `default`。其他部署显式使用 `--profile regional`；profile 只能由字母、数字、`-`、`_` 构成并以字母开头。服务、SLS 路由和 PaaS 契约只从私有配置文件读取；环境变量仅用于运行时凭据。
+默认使用 `default`。其他部署显式使用 `--profile regional`；profile 只能由字母、数字、`-`、`_` 构成并以字母开头。服务、SLS 路由、PaaS 契约及其凭据均来自 Keychain 或私有配置文件，不读取环境变量。
 
 ## 常见问题
 
-**依赖或配置失败？** 运行 `python3 scripts/setup.py --check --capability <能力>`，按错误补齐私有配置或 Keychain/环境变量。
+**依赖或配置失败？** 运行 `python3 scripts/setup.py --check --capability <能力>`，按错误补齐私有配置或 Keychain。
 
 **SLS 超时、权限失败或结果截断？** 先运行 `--doctor`，缩小范围；截断数据只能视为不完整证据。
 

@@ -35,7 +35,7 @@ description: 对已配置服务执行 SLS 日志检索、TraceId 排障、趋势
 ## 共同边界
 
 1. 数据库验证、导出和变更所需的服务、环境、用途和 SQL 必须由用户明确提供；不得猜测服务、group 或环境。日志检索仅可在当前目录唯一服务映射或显式参数可确定范围时执行，并在结果中说明最终服务与环境。
-2. SLS 的 project、region/endpoint、AK、SK 只从权限为 `600` 的私有配置文件读取；禁止写入源码、命令行参数或对话输出。PaaS Cookie 与测试库密码从 macOS Keychain（service=`service-ops`）或运行时环境变量读取：default profile 的 PaaS 使用 `paas-cookie` / `PAAS_COOKIE`，其他 profile 使用 `paas-cookie` / `PAAS_COOKIE_<PROFILE>`。Keychain 读取最多等待 10 秒，错误或超时后回退到同一 profile 的环境变量。
+2. SLS、PaaS 与测试库的全部配置和凭据均只从权限为 `600` 的私有配置文件或 macOS Keychain（service=`service-ops`）读取；Keychain 中同 profile 的 `sls-ak`、`sls-sk`、`paas-cookie`、`test-db-password` 优先，配置文件兜底。Keychain 读取最多等待 10 秒，错误或超时后回退到同一 profile 的配置文件。禁止写入源码、命令行参数、环境变量或对话输出。
 3. 生产查询、生产导出和任何变更工单都必须先得到用户明确授权。输出不得包含 Cookie、授权头、原始敏感日志或完整导出数据；分析摘要必须保留内置及私有配置的脱敏结果。
 4. PaaS 失败属于证据或提交失败，不能当作空结果或成功；只报告可确认的结果。
 5. 工单操作不得由 Skill 的自动匹配、排障上下文或“处理一下”之类的隐含表达触发；必须由用户在当前请求中显式调用 `$skills-service-ops` 并说明提交、审批、立即执行或撤回的具体意图。
@@ -99,11 +99,11 @@ python3 <skill-dir>/scripts/db_apply.py \
 
 ## 配置
 
-运行 `python3 <skill-dir>/scripts/setup.py --init` 会创建用户私有配置 `~/.service-ops/config.yaml`，并设置权限为 `600`；SLS 的 project、region/endpoint、AK、SK，PaaS HTTP 契约（请求头、端点、字段映射）和日志识别、脱敏正则都在这里，SLS 连接由内置 `sls_query.py --doctor` 检查。PaaS 查询成功响应固定为 `[{"columnList": [...], "rows": [...]}]`，其他响应结构暂不支持。脚本会拒绝读取权限过宽或格式无效的配置。每个可直连测试服务必须填写 `services.<service>.test_database`；测试库账号必须只拥有该配置库的最小权限。PaaS Cookie 和测试库密码从 Keychain 或同 profile 的运行时环境变量读取。只使用日志时运行 `setup.py --check --capability sls`；生产查询运行 `paas`，测试库验证运行 `db`，导出运行 `export`，工单运行 `apply`；用 `setup.py --check --capability db --service <service>` 可提前验证该服务的测试库映射和密码；同时使用全部能力才使用默认 `all`。安装依赖前只检查，不自动安装。真实 SLS 查询仅支持 macOS 或 Unix 主线程；Windows 不在支持范围内：
+运行 `python3 <skill-dir>/scripts/setup.py --init` 会创建用户私有配置 `~/.service-ops/config.yaml`，并设置权限为 `600`；SLS 的 project、region/endpoint、AK、SK，PaaS Cookie、HTTP 契约（请求头、端点、字段映射）、测试库密码和日志识别、脱敏正则都在这里。macOS Keychain 的同 profile 凭据优先，配置文件兜底；不读取环境变量。SLS 连接由内置 `sls_query.py --doctor` 检查。PaaS 查询成功响应固定为 `[{"columnList": [...], "rows": [...]}]`，其他响应结构暂不支持。脚本会拒绝读取权限过宽或格式无效的配置。每个可直连测试服务必须填写 `services.<service>.test_database`；测试库账号必须只拥有该配置库的最小权限。只使用日志时运行 `setup.py --check --capability sls`；生产查询运行 `paas`，测试库验证运行 `db`，导出运行 `export`，工单运行 `apply`；用 `setup.py --check --capability db --service <service>` 可提前验证该服务的测试库映射和密码；同时使用全部能力才使用默认 `all`。安装依赖前只检查，不自动安装。真实 SLS 查询仅支持 macOS 或 Unix 主线程；Windows 不在支持范围内：
 
 `requirements.txt` 只记录顶层依赖意图；安装与 CI 使用已解析的 `requirements.lock`。
 
-配置以 profile 隔离。模板只提供通用 `default`；可新增以字母开头、仅包含字母、数字、`-`、`_` 的自定义 profile。日常使用默认 profile；其他部署显式传 `--profile <profile>`。服务、SLS 路由和 PaaS 契约只从私有配置文件读取；环境变量仅用于运行时凭据。`--env` 仅保留为兼容别名，等同于同名 profile。
+配置以 profile 隔离。模板只提供通用 `default`；可新增以字母开头、仅包含字母、数字、`-`、`_` 的自定义 profile。日常使用默认 profile；其他部署显式传 `--profile <profile>`。全部配置与凭据只从 Keychain 或私有配置文件读取，不读取环境变量。`--env` 仅保留为兼容别名，等同于同名 profile。
 
 ```bash
 python3 -m pip install -r <skill-dir>/requirements.lock

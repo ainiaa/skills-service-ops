@@ -1,7 +1,8 @@
-# 运行 `python3 scripts/setup.py --init` 会将本模板复制到 ~/.service-ops/config.yaml；请只填写该权限为 600 的私有文件。SLS 全部配置（含 AK/SK）保存在此处；禁止存放 PaaS Cookie 和测试库密码。
+# 运行 `python3 scripts/setup.py --init` 会将本模板复制到 ~/.service-ops/config.yaml；请只填写该权限为 600 的私有文件。全部配置与凭据均保存在此处；macOS Keychain 中同名凭据优先于此文件。
 profiles:
   default:
     paas:
+      cookie: ""
       query_api_url: ""
       query_envs: {prod: "", test: ""}
       query_contract:
@@ -22,7 +23,7 @@ profiles:
         execute: {endpoint: "", id_field: ""}
         recall: {endpoint: "", id_field: ""}
     # 测试库账号应仅有各服务 services.<service>.test_database 的最小权限。
-    test_db: {host: "", port: 3306, user: ""}
+    test_db: {host: "", port: 3306, user: "", password: ""}
     sls: {project: "", region: "", endpoint: "", access_key: "", access_secret: ""}
     log_analysis: {related_service_pattern: "", entity_patterns: {}, redaction_patterns: []}
     services: {}

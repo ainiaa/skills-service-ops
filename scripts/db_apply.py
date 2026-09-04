@@ -335,7 +335,7 @@ def main():
                                            {"request": stored["request"], "tickets": stored["tickets"]}, stored.get("nonce"))
                 if args.confirm != token or stored["request"] != request:
                     raise ValueError("确认指纹与预检计划不一致；请重新预检后再提交。")
-                cookie = paas.get_cookie()
+                cookie = paas.get_cookie(config=config)
                 if not cookie:
                     raise ValueError("未找到 PaaS Cookie。")
                 tickets = claim_preflight(args.confirm)["tickets"]
@@ -390,9 +390,9 @@ def main():
                                        {"request": stored["request"], "tickets": stored["tickets"]}, stored.get("nonce"))
             if args.confirm != token or stored["request"] != request:
                 raise ValueError("确认指纹与预检计划不一致；请重新预检后再提交。")
-            cookie = paas.get_cookie()
+            cookie = paas.get_cookie(config=config)
             if not cookie:
-                raise ValueError("未找到 PaaS Cookie；请写入 Keychain 或设置 PAAS_COOKIE。")
+                raise ValueError("未找到 PaaS Cookie；请写入 Keychain 或私有配置文件。")
             stored = claim_preflight(args.confirm)
             tickets = stored["tickets"]
         except (OSError, ValueError) as error:

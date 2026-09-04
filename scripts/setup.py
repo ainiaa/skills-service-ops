@@ -48,14 +48,14 @@ def check_readiness(capability="all", profile=None, service=None):
             config = paas.load_config(profile)
         except (ImportError, ValueError) as error:
             errors.append(str(error))
-    if capability in ("all", "paas", "export", "apply") and not paas.get_cookie(profile):
+    if capability in ("all", "paas", "export", "apply") and not paas.get_cookie(profile, config):
         errors.append("PaaS Cookie 未配置")
     if capability in ("all", "paas", "export") and config is not None:
         errors.extend(paas.query_configuration_errors(config))
     if capability in ("all", "db") and config is not None:
         database_errors = paas.test_database_configuration_errors(config, service)
         errors.extend(database_errors)
-        if not database_errors and not paas.get_test_db_password(profile):
+        if not database_errors and not paas.get_test_db_password(profile, config):
             errors.append("测试库密码未配置。")
     if capability in ("all", "apply") and config is not None:
         errors.extend(paas.apply_configuration_errors(config))
