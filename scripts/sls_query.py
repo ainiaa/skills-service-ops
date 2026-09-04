@@ -181,7 +181,7 @@ def require_sdk():
         from aliyun.log import LogClient
         return LogClient
     except ImportError as error:
-        raise RuntimeError("缺少 aliyun-log-python-sdk；请执行 python3 -m pip install -r requirements.txt。") from error
+        raise RuntimeError("缺少 aliyun-log-python-sdk；请执行 python3 -m pip install -r requirements.lock。") from error
 
 
 def set_remaining_request_timeout(client, started, monotonic):

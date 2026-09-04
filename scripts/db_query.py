@@ -49,6 +49,7 @@ def main():
     parser = argparse.ArgumentParser(description="排障只读数据库查询")
     parser.add_argument("--env", required=True, choices=["prod", "test"])
     parser.add_argument("--service", required=True)
+    parser.add_argument("--purpose", required=True)
     parser.add_argument("--sql", required=True)
     parser.add_argument("--profile")
     args = parser.parse_args()
@@ -56,6 +57,9 @@ def main():
         paas.set_active_profile(args.profile)
     except ValueError as error:
         parser.error(str(error))
+    args.purpose = args.purpose.strip()
+    if not args.purpose:
+        parser.error("--purpose 不能为空。")
     if not is_incident_query(args.sql):
         parser.error("仅允许显式字段、带不超过 {} 行 LIMIT 的单条非锁定 SELECT。".format(MAX_INCIDENT_ROWS))
     try:
@@ -67,7 +71,7 @@ def main():
     except (ImportError, OSError, ValueError) as error:
         paas.print_json({"error": str(error)}, stream=sys.stderr)
         raise SystemExit(2)
-    paas.print_json(result)
+    paas.print_json({"purpose": args.purpose, **result})
 
 
 if __name__ == "__main__":

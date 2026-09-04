@@ -75,6 +75,26 @@ class ReadOnlyQueryTests(unittest.TestCase):
 
 
 class ExportTests(unittest.TestCase):
+    def test_database_commands_require_a_purpose(self):
+        commands = (
+            (db_query.main, ["db_query.py", "--env", "prod", "--service", "orders",
+                             "--sql", "SELECT id FROM orders LIMIT 1"]),
+            (db_export.main, ["db_export.py", "--env", "prod", "--service", "orders",
+                              "--sql", "SELECT id FROM orders LIMIT 1", "--output", "/tmp/orders.xlsx"]),
+            (db_query.main, ["db_query.py", "--env", "prod", "--service", "orders",
+                             "--purpose", "  ", "--sql", "SELECT id FROM orders LIMIT 1"]),
+            (db_export.main, ["db_export.py", "--env", "prod", "--service", "orders",
+                              "--purpose", "  ", "--sql", "SELECT id FROM orders LIMIT 1", "--output", "/tmp/orders.xlsx"]),
+        )
+        for command, argv in commands:
+            with self.subTest(command=command.__module__), \
+                 patch.object(sys, "argv", argv), \
+                 redirect_stderr(io.StringIO()) as stderr, \
+                 self.assertRaises(SystemExit) as exited:
+                command()
+            self.assertEqual(exited.exception.code, 2)
+            self.assertIn("--purpose", stderr.getvalue())
+
     def test_writes_xlsx_with_headers(self):
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "orders.xlsx"
@@ -102,9 +122,12 @@ class ExportTests(unittest.TestCase):
              patch.object(paas, "load_config", return_value=config), \
              patch.object(paas, "query", return_value={"columns": ["id"], "rows": []}) as query, \
              patch.object(sys, "argv", ["db_export.py", "--env", "prod", "--service", "orders",
-                                         "--sql", sql, "--output", str(Path(directory) / "orders.xlsx")]):
+                                         "--purpose", "incident verification", "--sql", sql,
+                                         "--output", str(Path(directory) / "orders.xlsx")]), \
+             redirect_stdout(io.StringIO()) as stdout:
             db_export.main()
         query.assert_called_once_with(config, "orders", "prod", sql, 10000)
+        self.assertEqual(json.loads(stdout.getvalue())["purpose"], "incident verification")
 
     def test_export_requires_an_absolute_xlsx_path(self):
         self.assertTrue(db_export.is_valid_output_path(Path("/tmp/orders.xlsx")))
@@ -130,7 +153,7 @@ class ExportTests(unittest.TestCase):
              patch.object(paas, "query", return_value={"columns": ["id"], "rows": [[1]]}), \
              patch.object(db_export, "write_xlsx", side_effect=OSError("permission denied")), \
              patch.object(sys, "argv", ["db_export.py", "--env", "prod", "--service", "orders",
-                                         "--sql", "SELECT id FROM orders LIMIT 1",
+                                         "--purpose", "incident verification", "--sql", "SELECT id FROM orders LIMIT 1",
                                          "--output", str(Path(directory) / "orders.xlsx")]), \
              redirect_stderr(io.StringIO()) as stderr, \
              self.assertRaises(SystemExit) as exited:
@@ -141,7 +164,7 @@ class ExportTests(unittest.TestCase):
 
     def test_export_rejects_multiple_sql_sources(self):
         with patch.object(sys, "argv", ["db_export.py", "--env", "test", "--service", "orders",
-                                         "--sql", "SELECT id FROM orders LIMIT 1", "--sql-file", "/tmp/orders.sql",
+                                         "--purpose", "incident verification", "--sql", "SELECT id FROM orders LIMIT 1", "--sql-file", "/tmp/orders.sql",
                                          "--output", "/tmp/orders.xlsx"]), \
              redirect_stderr(io.StringIO()) as stderr, \
              self.assertRaises(SystemExit) as exited:
@@ -151,7 +174,7 @@ class ExportTests(unittest.TestCase):
 
     def test_export_reports_unreadable_sql_file_without_traceback(self):
         with patch.object(sys, "argv", ["db_export.py", "--env", "test", "--service", "orders",
-                                         "--sql-file", "/definitely-missing-orders.sql", "--output", "/tmp/orders.xlsx"]), \
+                                         "--purpose", "incident verification", "--sql-file", "/definitely-missing-orders.sql", "--output", "/tmp/orders.xlsx"]), \
              redirect_stderr(io.StringIO()) as stderr, \
              self.assertRaises(SystemExit) as exited:
             db_export.main()
@@ -703,7 +726,7 @@ class DatabaseRoutingTests(unittest.TestCase):
              patch.object(paas, "load_config", return_value=config), \
              patch.object(paas, "_keychain_value", return_value="password"), \
              patch.object(sys, "argv", ["db_query.py", "--env", "test", "--service", "orders",
-                                         "--sql", "SELECT id FROM orders LIMIT 1"]), \
+                                         "--purpose", "incident verification", "--sql", "SELECT id FROM orders LIMIT 1"]), \
              redirect_stderr(io.StringIO()) as stderr, \
              self.assertRaises(SystemExit) as exited:
             db_query.main()
@@ -792,6 +815,16 @@ class DatabaseRoutingTests(unittest.TestCase):
 
 
 class SetupTests(unittest.TestCase):
+    def test_configuration_template_points_to_the_runtime_configuration_path(self):
+        template = (Path(__file__).parent.parent / "config" / "settings.yaml.example").read_text(encoding="utf-8")
+        self.assertIn("~/.service-ops/config.yaml", template)
+        self.assertNotIn("复制为 settings.yaml", template)
+
+    def test_clean_install_workflow_uses_the_lock_and_readiness_check(self):
+        workflow = (Path(__file__).parent.parent / ".github" / "workflows" / "verify.yml").read_text(encoding="utf-8")
+        self.assertIn("python -m pip install -r requirements.lock", workflow)
+        self.assertIn("python scripts/setup.py --check-dependencies --capability all", workflow)
+
     def test_dependency_lock_pins_every_runtime_dependency(self):
         root = Path(__file__).parent.parent
         direct_dependencies = {"requests", "pyyaml", "aliyun-log-python-sdk", "openpyxl", "pymysql"}
@@ -1200,8 +1233,8 @@ class LocalSlsQueryTests(unittest.TestCase):
 class CustomProfileTests(unittest.TestCase):
     def test_database_scripts_defer_custom_profile_validation_to_config(self):
         cases = (
-            (db_query.main, ["db_query.py", "--env", "prod", "--service", "wms", "--sql", "SELECT id FROM orders LIMIT 1", "--profile", "custom"]),
-            (db_export.main, ["db_export.py", "--env", "prod", "--service", "wms", "--sql", "SELECT id FROM orders LIMIT 1", "--output", "/tmp/custom-profile.xlsx", "--profile", "custom"]),
+            (db_query.main, ["db_query.py", "--env", "prod", "--service", "wms", "--purpose", "incident verification", "--sql", "SELECT id FROM orders LIMIT 1", "--profile", "custom"]),
+            (db_export.main, ["db_export.py", "--env", "prod", "--service", "wms", "--purpose", "incident verification", "--sql", "SELECT id FROM orders LIMIT 1", "--output", "/tmp/custom-profile.xlsx", "--profile", "custom"]),
             (db_apply.main, ["db_apply.py", "--action", "approve", "--id", "1", "--profile", "custom"]),
         )
         for main, argv in cases:
@@ -1217,8 +1250,8 @@ class CustomProfileTests(unittest.TestCase):
 
     def test_database_scripts_reject_invalid_profile_without_traceback(self):
         cases = (
-            (db_query.main, ["db_query.py", "--env", "prod", "--service", "wms", "--sql", "SELECT id FROM orders LIMIT 1", "--profile", "dev.us"]),
-            (db_export.main, ["db_export.py", "--env", "prod", "--service", "wms", "--sql", "SELECT id FROM orders LIMIT 1", "--output", "/tmp/invalid-profile.xlsx", "--profile", "dev.us"]),
+            (db_query.main, ["db_query.py", "--env", "prod", "--service", "wms", "--purpose", "incident verification", "--sql", "SELECT id FROM orders LIMIT 1", "--profile", "dev.us"]),
+            (db_export.main, ["db_export.py", "--env", "prod", "--service", "wms", "--purpose", "incident verification", "--sql", "SELECT id FROM orders LIMIT 1", "--output", "/tmp/invalid-profile.xlsx", "--profile", "dev.us"]),
             (db_apply.main, ["db_apply.py", "--profile", "dev.us"]),
         )
         for main, argv in cases:

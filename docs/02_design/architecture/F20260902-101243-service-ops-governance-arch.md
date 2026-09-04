@@ -54,6 +54,8 @@ sls_query.py --raw / --jsonl
 
 `install.sh --capability <name>` 与 `setup.py --check --capability <name>` 均按表中能力检查；未指定时默认 `all`。安装脚本不自动安装依赖或执行外部探针。
 
+数据库验证与导出命令将用途设为必填 CLI 参数，并只在本地受控输出中回显；用途不附加到 PaaS 请求体，避免改变私有 PaaS 协议。PaaS 查询成功响应固定为 `[{"columnList": [...], "rows": [...]}]`，模板和运行时错误均明确该边界，尚不为单一已知协议引入可配置响应适配层。GitHub Actions 在 macOS 临时环境安装 `requirements.lock` 后运行依赖检查、全量测试和脚本编译；它不读取凭据或发起 SLS/PaaS 请求。真实 SLS 查询的支持范围保持 macOS/Unix 主线程，Windows 明确不支持。
+
 工单契约不属于 `paas` 就绪检查范围：工单只能显式调用，且在执行前校验所需端点和字段，避免不使用工单的用户被无关配置阻塞。
 
 ## 4.1 独立日志分析

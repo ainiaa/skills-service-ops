@@ -52,7 +52,7 @@ def load_config(profile=None):
     try:
         import yaml
     except ImportError as error:
-        raise ImportError("缺少 pyyaml；请执行 python3 -m pip install -r requirements.txt。") from error
+        raise ImportError("缺少 pyyaml；请执行 python3 -m pip install -r requirements.lock。") from error
     if not CONFIG_PATH.exists():
         raise ValueError("本地配置不存在：{}；请从仓库 config/settings.yaml.example 创建。".format(CONFIG_PATH))
     if CONFIG_PATH.stat().st_mode & 0o077:
@@ -341,6 +341,7 @@ def query_payload(config, service, env, sql, limit):
 
 
 def query(config, service, env, sql, limit=1000):
+    """Execute the documented fixed PaaS result envelope: [{columnList, rows}]."""
     import requests
 
     cookie = get_cookie()

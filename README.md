@@ -11,11 +11,13 @@ python3 scripts/setup.py --init
 python3 scripts/setup.py --check --capability sls
 ```
 
-`requirements.txt` 保留顶层依赖意图；日常安装和 CI 使用由当前 Python 版本解析并验证过的 `requirements.lock`。
+`requirements.txt` 保留顶层依赖意图；日常安装和 CI 使用已在 Python 3.14/macOS 隔离环境解析并验证的 `requirements.lock`。
 
 只使用 SLS 时检查 `sls`；生产查询检查 `paas`，测试库验证检查 `db`，导出检查 `export`，工单检查 `apply`；全部能力均需使用时才检查 `all`。已有依赖和配置时，可用 `./install.sh --capability sls` 仅检查某项能力的依赖与配置初始化状态。
 
-填写 `sls.project`、`sls.region`（或 `sls.endpoint`）、`services.<service>.prod_db_group` 与 `services.<service>.test_database`。测试库账号必须只拥有对应 `test_database` 的最小权限。PaaS 的 Cookie 前缀、静态请求头、查询/提交/工单端点及字段映射，和日志服务/实体识别正则也只填写在私有配置中。凭据不得写入文件：default profile 使用 Keychain 的 `paas-cookie` 或 `PAAS_COOKIE`；其他 profile 使用 `paas-cookie` 或 `PAAS_COOKIE_<PROFILE>`。SLS 使用 Keychain 的 `sls-ak`、`sls-sk` 或 `SLS_LOG_AK`、`SLS_LOG_SK`；测试库密码使用 Keychain 的 `test-db-password` 或同 profile 的 `TEST_DB_PASSWORD`。Keychain 读取最多等待 10 秒，失败后会回退到同一 profile 的环境变量。SLS 依赖锁定在已验证的 0.9.x。首次使用 SLS 前运行 `python3 scripts/sls_query.py --doctor --service <service-or-logstore>`；它会做一次最近 5 分钟、最多 1 条且不输出日志内容的只读权限探针。
+填写 `sls.project`、`sls.region`（或 `sls.endpoint`）、`services.<service>.prod_db_group` 与 `services.<service>.test_database`。测试库账号必须只拥有对应 `test_database` 的最小权限。PaaS 的 Cookie 前缀、静态请求头、查询/提交/工单端点及字段映射，和日志服务/实体识别正则也只填写在私有配置中；查询成功响应固定为 `[{"columnList": [...], "rows": [...]}]`，其他结构暂不支持。凭据不得写入文件：default profile 使用 Keychain 的 `paas-cookie` 或 `PAAS_COOKIE`；其他 profile 使用 `paas-cookie` 或 `PAAS_COOKIE_<PROFILE>`。SLS 使用 Keychain 的 `sls-ak`、`sls-sk` 或 `SLS_LOG_AK`、`SLS_LOG_SK`；测试库密码使用 Keychain 的 `test-db-password` 或同 profile 的 `TEST_DB_PASSWORD`。Keychain 读取最多等待 10 秒，失败后会回退到同一 profile 的环境变量。SLS 依赖锁定在已验证的 0.9.x。首次使用 SLS 前运行 `python3 scripts/sls_query.py --doctor --service <service-or-logstore>`；它会做一次最近 5 分钟、最多 1 条且不输出日志内容的只读权限探针。
+
+支持 macOS 与 Unix 主线程运行真实 SLS 查询；Windows 不在支持范围内。
 
 已有私有配置需要补充 `paas.cookie_prefix`、`paas.request_headers`、`paas.query_contract`、`paas.apply_*`、`paas.task_*` 以及 `log_analysis` 下的识别与 `redaction_patterns` 脱敏正则。它们属于内部部署契约，只能保留在 `~/.service-ops/config.yaml`，不得提交到仓库。
 

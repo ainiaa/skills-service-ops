@@ -1,4 +1,4 @@
-# 本地配置模板；复制为 settings.yaml 后填写。禁止存放 Cookie 或其他凭据。
+# 运行 `python3 scripts/setup.py --init` 会将本模板复制到 ~/.service-ops/config.yaml；请只填写该私有文件。禁止存放 Cookie 或其他凭据。
 profiles:
   default:
     paas:
@@ -6,6 +6,7 @@ profiles:
       query_envs: {prod: "", test: ""}
       query_contract:
         fields: {group: "", env: "", sql: "", limit: ""}
+      # 查询响应固定为 [{"columnList": ["id"], "rows": [[1]]}]；其他响应结构暂不支持。
       cookie_prefix: ""
       request_headers: {}
       apply_api_base: ""

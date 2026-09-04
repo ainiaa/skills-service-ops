@@ -70,6 +70,7 @@ python3 <skill-dir>/scripts/log_analyzer.py < "$TMP_DIR/logs.json" > "$TMP_DIR/a
 ```bash
 python3 <skill-dir>/scripts/db_export.py \
   --env "<prod|test>" --service "<service>" \
+  --purpose "<export purpose>" \
   --sql-file "<sql-file>" --output "<absolute-output>.xlsx"
 ```
 
@@ -98,7 +99,7 @@ python3 <skill-dir>/scripts/db_apply.py \
 
 ## 配置
 
-运行 `python3 <skill-dir>/scripts/setup.py --init` 会创建用户私有配置 `~/.service-ops/config.yaml`，并设置权限为 `600`；SLS project、region/endpoint、PaaS HTTP 契约（请求头、端点、字段映射）和日志识别、脱敏正则都在这里，SLS 连接由内置 `sls_query.py --doctor` 检查。脚本会拒绝读取权限过宽或格式无效的配置。每个可直连测试服务必须填写 `services.<service>.test_database`；测试库账号必须只拥有该配置库的最小权限。配置不保存凭据；Cookie、SLS AK/SK 和测试库密码从 Keychain 或同 profile 的运行时环境变量读取。只使用日志时运行 `setup.py --check --capability sls`；生产查询运行 `paas`，测试库验证运行 `db`，导出运行 `export`，工单运行 `apply`；用 `setup.py --check --capability db --service <service>` 可提前验证该服务的测试库映射和密码；同时使用全部能力才使用默认 `all`。安装依赖前只检查，不自动安装：
+运行 `python3 <skill-dir>/scripts/setup.py --init` 会创建用户私有配置 `~/.service-ops/config.yaml`，并设置权限为 `600`；SLS project、region/endpoint、PaaS HTTP 契约（请求头、端点、字段映射）和日志识别、脱敏正则都在这里，SLS 连接由内置 `sls_query.py --doctor` 检查。PaaS 查询成功响应固定为 `[{"columnList": [...], "rows": [...]}]`，其他响应结构暂不支持。脚本会拒绝读取权限过宽或格式无效的配置。每个可直连测试服务必须填写 `services.<service>.test_database`；测试库账号必须只拥有该配置库的最小权限。配置不保存凭据；Cookie、SLS AK/SK 和测试库密码从 Keychain 或同 profile 的运行时环境变量读取。只使用日志时运行 `setup.py --check --capability sls`；生产查询运行 `paas`，测试库验证运行 `db`，导出运行 `export`，工单运行 `apply`；用 `setup.py --check --capability db --service <service>` 可提前验证该服务的测试库映射和密码；同时使用全部能力才使用默认 `all`。安装依赖前只检查，不自动安装。真实 SLS 查询仅支持 macOS 或 Unix 主线程；Windows 不在支持范围内：
 
 `requirements.txt` 只记录顶层依赖意图；安装与 CI 使用已解析的 `requirements.lock`。
 

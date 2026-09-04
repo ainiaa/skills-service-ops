@@ -64,6 +64,7 @@ def main():
     parser = argparse.ArgumentParser(description="导出只读查询结果为 Excel")
     parser.add_argument("--env", required=True, choices=["prod", "test"])
     parser.add_argument("--service", required=True)
+    parser.add_argument("--purpose", required=True)
     source = parser.add_mutually_exclusive_group(required=True)
     source.add_argument("--sql")
     source.add_argument("--sql-file")
@@ -75,6 +76,9 @@ def main():
         paas.set_active_profile(args.profile)
     except ValueError as error:
         parser.error(str(error))
+    args.purpose = args.purpose.strip()
+    if not args.purpose:
+        parser.error("--purpose 不能为空。")
     try:
         args.sql = read_sql(args.sql, args.sql_file)
     except (OSError, UnicodeError):
@@ -100,14 +104,14 @@ def main():
         validate_export_result(result["columns"], result["rows"], limit)
         rows = write_xlsx(result["columns"], result["rows"], output)
     except ImportError:
-        parser.error("缺少 openpyxl；请安装 requirements.txt。")
+        parser.error("缺少 openpyxl；请安装 requirements.lock。")
     except ValueError as error:
         paas.print_json({"error": str(error)}, stream=sys.stderr)
         raise SystemExit(2)
     except OSError:
         paas.print_json({"error": "Excel 文件写入失败。"}, stream=sys.stderr)
         raise SystemExit(2)
-    paas.print_json({"output": str(output), "rows": rows})
+    paas.print_json({"purpose": args.purpose, "output": str(output), "rows": rows})
 
 
 if __name__ == "__main__":
