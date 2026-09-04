@@ -15,9 +15,9 @@ python3 scripts/setup.py --check --capability sls
 
 ## 配置与凭据
 
-`setup.py --init` 会从 [配置模板](config/settings.yaml.example) 创建权限为 `600` 的 `~/.service-ops/config.yaml`。填写 SLS project/region、服务的生产 group 与测试库、PaaS 契约和可选脱敏规则；PaaS 查询成功响应固定为 `[{"columnList": [...], "rows": [...]}]`。
+`setup.py --init` 会从 [配置模板](config/settings.yaml.example) 创建权限为 `600` 的 `~/.service-ops/config.yaml`。填写 SLS 的 project/region/endpoint/AK/SK、服务的生产 group 与测试库、PaaS 契约和可选脱敏规则；PaaS 查询成功响应固定为 `[{"columnList": [...], "rows": [...]}]`。
 
-配置不保存凭据。默认 profile 使用 Keychain 或 `PAAS_COOKIE`、`SLS_LOG_AK`、`SLS_LOG_SK`、`TEST_DB_PASSWORD`；其他 profile 使用 `_<PROFILE>` 环境变量后缀。
+SLS 配置（含 AK/SK）只从该私有文件读取。PaaS Cookie 与测试库密码不写配置文件：默认 profile 使用 Keychain 或 `PAAS_COOKIE`、`TEST_DB_PASSWORD`；其他 profile 使用 `_<PROFILE>` 环境变量后缀。
 
 ## 常用场景
 
@@ -78,7 +78,7 @@ python3 scripts/db_apply.py --env prod --service orders \
 
 ### 使用 profile
 
-默认使用 `default`。其他部署使用 `--profile regional` 或设置 `SERVICE_OPS_PROFILE=regional`；profile 只能由字母、数字、`-`、`_` 构成并以字母开头。
+默认使用 `default`。其他部署显式使用 `--profile regional`；profile 只能由字母、数字、`-`、`_` 构成并以字母开头。服务、SLS 路由和 PaaS 契约只从私有配置文件读取；环境变量仅用于运行时凭据。
 
 ## 常见问题
 

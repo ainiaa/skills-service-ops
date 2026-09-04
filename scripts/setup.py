@@ -70,7 +70,7 @@ def check_readiness(capability="all", profile=None, service=None):
         if not settings.get("region") and not settings.get("endpoint"):
             errors.append("当前 profile 未配置 SLS region 或 endpoint。")
         try:
-            sls_query.get_credentials(profile)
+            sls_query.get_credentials(profile, config)
         except ValueError as error:
             errors.append(str(error))
     return errors
@@ -82,7 +82,7 @@ def main():
     parser.add_argument("--check", action="store_true", help="检查配置权限与 Keychain 凭据")
     parser.add_argument("--capability", choices=("all", "paas", "sls", "db", "export", "apply"), default="all",
                         help="--check 的检查范围，默认 all")
-    parser.add_argument("--profile", help="要检查的配置 profile，默认当前 SERVICE_OPS_PROFILE")
+    parser.add_argument("--profile", help="要检查的配置 profile，默认 default")
     parser.add_argument("--service", help="检查 db 时一并校验该服务的 test_database 映射")
     parser.add_argument("--check-dependencies", action="store_true", help="仅检查 Python 运行依赖")
     args = parser.parse_args()

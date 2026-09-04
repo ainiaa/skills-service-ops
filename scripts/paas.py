@@ -11,6 +11,7 @@ from pathlib import Path
 CONFIG_PATH = Path.home() / ".service-ops" / "config.yaml"
 KEYCHAIN_SERVICE = "service-ops"
 KEYCHAIN_TIMEOUT_SECONDS = 10
+_ACTIVE_PROFILE = "default"
 _PROFILE_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*$")
 _SENSITIVE_LOG_VALUE = re.compile(
     r"(?i)(\b(?:authorization|cookie|token|password|passwd|secret|api[_-]?key|access[_-]?key)\b"
@@ -27,7 +28,7 @@ _NON_READ_ONLY_SELECT_FUNCTIONS = {
 
 
 def active_profile():
-    return os.environ.get("SERVICE_OPS_PROFILE", "default")
+    return _ACTIVE_PROFILE
 
 
 def validate_profile_name(profile):
@@ -37,8 +38,8 @@ def validate_profile_name(profile):
 
 
 def set_active_profile(profile):
-    if profile:
-        os.environ["SERVICE_OPS_PROFILE"] = validate_profile_name(profile)
+    global _ACTIVE_PROFILE
+    _ACTIVE_PROFILE = validate_profile_name(profile) if profile else "default"
 
 
 def profile_env_name(base, profile=None):

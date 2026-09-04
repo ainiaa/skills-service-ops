@@ -657,6 +657,25 @@ class ApplyTests(unittest.TestCase):
 
 
 class DatabaseRoutingTests(unittest.TestCase):
+    def test_runtime_profile_does_not_come_from_environment(self):
+        with patch.dict(os.environ, {"SERVICE_OPS_PROFILE": "regional"}, clear=False):
+            paas.set_active_profile(None)
+            self.assertEqual(paas.active_profile(), "default")
+
+    def test_sls_connection_does_not_fall_back_to_environment_configuration(self):
+        with patch.dict(os.environ, {
+            "SLS_LOG_PROJECT": "environment-project",
+            "SLS_LOG_REGION": "ap-southeast-1",
+            "SLS_LOG_ENDPOINT": "environment-endpoint",
+        }, clear=False):
+            with self.assertRaisesRegex(ValueError, "SLS project"):
+                sls_query.resolve_connection("default", None, None, None, {"sls": {}})
+        self.assertEqual(
+            sls_query.resolve_connection("default", None, None, None,
+                                         {"sls": {"project": "configured-project", "region": "cn-hangzhou"}}),
+            ("configured-project", "cn-hangzhou", None),
+        )
+
     def test_keychain_timeout_is_bounded_and_falls_back_to_environment(self):
         with patch.object(paas.subprocess, "run", side_effect=subprocess.TimeoutExpired("security", 10)) as run, \
              patch.dict(os.environ, {"PAAS_COOKIE": "environment-cookie"}, clear=True):
@@ -825,6 +844,8 @@ class SetupTests(unittest.TestCase):
     def test_configuration_template_points_to_the_runtime_configuration_path(self):
         template = (Path(__file__).parent.parent / "config" / "settings.yaml.example").read_text(encoding="utf-8")
         self.assertIn("~/.service-ops/config.yaml", template)
+        self.assertIn("access_key", template)
+        self.assertIn("access_secret", template)
         self.assertNotIn("复制为 settings.yaml", template)
 
     def test_clean_install_workflow_uses_the_lock_and_readiness_check(self):
@@ -1202,20 +1223,24 @@ class LocalSlsQueryTests(unittest.TestCase):
         requirements = (Path(__file__).parent.parent / "requirements.txt").read_text(encoding="utf-8")
         self.assertIn("aliyun-log-python-sdk>=0.9.50,<0.10", requirements)
 
-    def test_sls_query_uses_service_ops_profile_and_keychain(self):
-        config = {"sls": {"project": "log-project", "region": "ap-southeast-1"}}
-        with patch.object(sls_query.paas, "load_config", return_value=config) as load_config, \
-             patch.object(sls_query.paas, "_keychain_value", side_effect=["ak", "sk"]):
-            self.assertEqual(sls_query.get_credentials(None), ("ak", "sk"))
-            self.assertEqual(sls_query.resolve_connection(None, None, None, None),
+    def test_sls_query_reads_all_sls_settings_from_private_config(self):
+        config = {"sls": {"project": "log-project", "region": "ap-southeast-1",
+                           "access_key": "config-ak", "access_secret": "config-sk"}}
+        with patch.dict(os.environ, {"SLS_LOG_AK": "environment-ak", "SLS_LOG_SK": "environment-sk"}, clear=False):
+            self.assertEqual(sls_query.get_credentials(None, config), ("config-ak", "config-sk"))
+            self.assertEqual(sls_query.resolve_connection(None, None, None, None, config),
                              ("log-project", "ap-southeast-1", None))
-        load_config.assert_called_once_with("default")
+
+    def test_sls_query_rejects_environment_credential_fallback(self):
+        with patch.dict(os.environ, {"SLS_LOG_AK": "environment-ak", "SLS_LOG_SK": "environment-sk"}, clear=False):
+            with self.assertRaisesRegex(ValueError, "SLS access_key/access_secret"):
+                sls_query.get_credentials("default", {"sls": {}})
 
     def test_sls_query_uses_the_active_profile_when_no_route_is_given(self):
         with patch.object(sls_query.paas, "active_profile", return_value="regional"):
             self.assertEqual(sls_query.resolve_profile(None, None), "regional")
-        self.assertEqual(sls_query.profile_env_name("SLS_LOG_AK", "default"), "SLS_LOG_AK")
-        self.assertEqual(sls_query.profile_env_name("SLS_LOG_AK", "regional"), "SLS_LOG_AK_REGIONAL")
+        self.assertEqual(paas.profile_env_name("PAAS_COOKIE", "default"), "PAAS_COOKIE")
+        self.assertEqual(paas.profile_env_name("PAAS_COOKIE", "regional"), "PAAS_COOKIE_REGIONAL")
 
     def test_sls_query_falls_back_to_full_text_when_indexes_are_unavailable(self):
         self.assertEqual(
@@ -1238,7 +1263,7 @@ class LocalSlsQueryTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             paas.validate_profile_name("dev.us")
         with self.assertRaises(ValueError):
-            sls_query.profile_env_name("SLS_LOG_AK", "dev.us")
+            paas.profile_env_name("PAAS_COOKIE", "dev.us")
 
 
 class CustomProfileTests(unittest.TestCase):

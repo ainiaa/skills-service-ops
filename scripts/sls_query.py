@@ -50,10 +50,6 @@ def hard_deadline(seconds=SLS_QUERY_DEADLINE_SECONDS):
         signal.signal(signal.SIGALRM, previous_handler)
 
 
-def profile_env_name(base, profile):
-    return paas.profile_env_name(base, profile)
-
-
 def parse_time(value, now):
     value = value.strip().lower()
     if value == "now":
@@ -123,22 +119,22 @@ def truncation_metadata(log_count, limit, page=None, offset=None):
     return None
 
 
-def get_credentials(profile):
+def get_credentials(profile, config=None):
     profile = profile or paas.active_profile()
-    paas.set_active_profile(profile)
-    access_key = paas._keychain_value("sls-ak") or os.environ.get(profile_env_name("SLS_LOG_AK", profile), "")
-    access_secret = paas._keychain_value("sls-sk") or os.environ.get(profile_env_name("SLS_LOG_SK", profile), "")
-    if not access_key or not access_secret:
-        raise ValueError("未找到 SLS AK/SK；请写入 service-ops Keychain 或设置 SLS_LOG_AK/SLS_LOG_SK。")
-    return access_key, access_secret
+    settings = (config if config is not None else paas.load_config(profile)).get("sls", {})
+    access_key = settings.get("access_key")
+    access_secret = settings.get("access_secret")
+    if not isinstance(access_key, str) or not access_key.strip() or not isinstance(access_secret, str) or not access_secret.strip():
+        raise ValueError("当前 profile 未配置 SLS access_key/access_secret。")
+    return access_key.strip(), access_secret.strip()
 
 
 def resolve_connection(profile, project, region, endpoint, config=None):
     profile = profile or paas.active_profile()
     settings = (config if config is not None else paas.load_config(profile)).get("sls", {})
-    resolved_project = project or settings.get("project") or os.environ.get(profile_env_name("SLS_LOG_PROJECT", profile))
-    resolved_endpoint = endpoint or (settings.get("endpoint") if region is None else None) or os.environ.get(profile_env_name("SLS_LOG_ENDPOINT", profile))
-    resolved_region = region or settings.get("region") or os.environ.get(profile_env_name("SLS_LOG_REGION", profile))
+    resolved_project = project or settings.get("project")
+    resolved_endpoint = endpoint or (settings.get("endpoint") if region is None else None)
+    resolved_region = region or settings.get("region")
     if not resolved_project:
         raise ValueError("当前 profile 未配置 SLS project。")
     if not resolved_endpoint and not resolved_region:
@@ -309,7 +305,7 @@ def main():
                 config = paas.load_config(args.profile)
                 redaction_patterns = paas.log_analysis_rules(config)["redaction_patterns"]
                 project, region, endpoint = resolve_connection(args.profile, args.project, args.region, args.endpoint, config)
-                access_key, access_secret = get_credentials(args.profile)
+                access_key, access_secret = get_credentials(args.profile, config)
                 client = require_sdk()(endpoint or "{}.log.aliyuncs.com".format(region), access_key, access_secret)
                 set_remaining_request_timeout(client, query_started, time.monotonic)
             except TimeoutError:
