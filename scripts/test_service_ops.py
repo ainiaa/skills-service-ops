@@ -822,6 +822,10 @@ class SetupTests(unittest.TestCase):
 
     def test_clean_install_workflow_uses_the_lock_and_readiness_check(self):
         workflow = (Path(__file__).parent.parent / ".github" / "workflows" / "verify.yml").read_text(encoding="utf-8")
+        self.assertIn("runner: [macos-latest, ubuntu-latest]", workflow)
+        self.assertIn("runs-on: ${{ matrix.runner }}", workflow)
+        self.assertIn("actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683", workflow)
+        self.assertIn("actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065", workflow)
         self.assertIn("python -m pip install -r requirements.lock", workflow)
         self.assertIn("python scripts/setup.py --check-dependencies --capability all", workflow)
 
