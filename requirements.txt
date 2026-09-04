@@ -1,0 +1,5 @@
+requests
+pyyaml
+aliyun-log-python-sdk>=0.9.50,<0.10
+openpyxl
+pymysql

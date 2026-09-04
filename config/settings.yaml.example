@@ -1,0 +1,27 @@
+# 本地配置模板；复制为 settings.yaml 后填写。禁止存放 Cookie 或其他凭据。
+profiles:
+  default:
+    paas:
+      query_api_url: ""
+      query_envs: {prod: "", test: ""}
+      query_contract:
+        fields: {group: "", env: "", sql: "", limit: ""}
+      cookie_prefix: ""
+      request_headers: {}
+      apply_api_base: ""
+      apply_endpoints: {ddl: "", dml: ""}
+      apply_response_id_field: ""
+      apply_envs: {prod: "", test: ""}
+      apply_contract:
+        service_name: ""
+        fields: {sql: "", service: "", group: "", reason: "", envs: "", start: "", end: ""}
+      task_api_base: ""
+      task_actions:
+        approve: {endpoint: "", id_field: "", message_field: ""}
+        execute: {endpoint: "", id_field: ""}
+        recall: {endpoint: "", id_field: ""}
+    # 测试库账号应仅有各服务 services.<service>.test_database 的最小权限。
+    test_db: {host: "", port: 3306, user: ""}
+    sls: {project: "", region: "", endpoint: ""}
+    log_analysis: {related_service_pattern: "", entity_patterns: {}, redaction_patterns: []}
+    services: {}

@@ -1,0 +1,49 @@
+{
+  "version": 1,
+  "skill": "skills-service-ops",
+  "purpose": "Skill 激活、追问和拒绝边界的回归场景。",
+  "cases": [
+    {
+      "id": "sls-log-search",
+      "input": "查询 orders 最近 15 分钟的 ERROR 日志。",
+      "expected_action": "activate",
+      "expected_route": "sls_query.py"
+    },
+    {
+      "id": "trace-incident",
+      "input": "使用 regional profile 排查 orders 的 TraceId abc-123。",
+      "expected_action": "activate",
+      "expected_route": "sls_log_fetcher.py -> log_analyzer.py"
+    },
+    {
+      "id": "aggregation-plan",
+      "input": "统计 orders 最近一小时 ERROR 最多的接口。",
+      "expected_action": "activate",
+      "expected_route": "SLS analysis plan"
+    },
+    {
+      "id": "ambiguous-data-request",
+      "input": "查一下订单数据。",
+      "expected_action": "ask",
+      "expected_route": "collect service/env/purpose/sql"
+    },
+    {
+      "id": "implicit-ticket",
+      "input": "处理一下订单表。",
+      "expected_action": "ask",
+      "expected_route": "clarify intent; do not invoke db_apply.py"
+    },
+    {
+      "id": "explicit-ticket",
+      "input": "$skills-service-ops：为 orders 生产环境提交 DML 工单。",
+      "expected_action": "activate",
+      "expected_route": "db_apply.py preflight"
+    },
+    {
+      "id": "generic-file-export",
+      "input": "把本地 CSV 转成 Excel。",
+      "expected_action": "do_not_activate",
+      "expected_route": "outside skill scope"
+    }
+  ]
+}
