@@ -31,4 +31,4 @@ python3 <skill-dir>/scripts/sls_query.py --dry-run --service "<service-or-logsto
   --from "<candidate-range>" --query "<candidate-query>" --limit <bounded-limit>
 ```
 
-确认后移除 `--dry-run` 执行；候选范围超过 1 小时时还需显式附加 `--allow-wide-range`。只摘要脱敏后的统计结果；若索引、权限、采样或截断不完整，结论必须说明局限。
+确认后移除 `--dry-run` 执行；候选范围超过 1 小时时还需显式附加 `--allow-wide-range`。SLS 日志与统计结果默认原样输出；只有用户明确要求脱敏时才附加 `--redact`。若索引、权限、采样或截断不完整，结论必须说明局限。

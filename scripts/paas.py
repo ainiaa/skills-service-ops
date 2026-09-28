@@ -21,8 +21,16 @@ _SENSITIVE_LOG_KEYS = {
     "access_token", "accesstoken", "refresh_token", "refreshtoken", "id_token", "idtoken",
     "api_key", "apikey", "access_key", "accesskey",
 }
-_NON_READ_ONLY_SELECT_FUNCTIONS = {
-    "BENCHMARK", "GET_LOCK", "LAST_INSERT_ID", "LOAD_FILE", "RELEASE_LOCK", "SLEEP",
+_SAFE_SELECT_FUNCTIONS = {
+    "ABS", "AVG", "CAST", "CEIL", "CEILING", "CHAR_LENGTH", "COALESCE", "CONCAT", "COUNT",
+    "CURRENT_TIMESTAMP", "DATE", "DATE_FORMAT", "DAY", "EXISTS", "FLOOR", "IF", "IFNULL", "IN",
+    "JSON_EXTRACT", "JSON_UNQUOTE", "LEFT", "LENGTH", "LOWER", "MAX", "MIN", "MONTH", "NOW",
+    "NULLIF", "REPLACE", "RIGHT", "ROUND", "SUBSTRING", "SUM", "TRIM", "UPPER", "YEAR",
+}
+_SELECT_GROUPING_KEYWORDS = {
+    "ALL", "AND", "AS", "BY", "CASE", "DISTINCT", "ELSE", "EXCEPT", "FROM", "HAVING",
+    "INTERSECT", "JOIN", "NOT", "ON", "OR", "OVER", "PARTITION", "SELECT", "THEN",
+    "UNION", "USING", "WHEN", "WHERE",
 }
 
 
@@ -57,9 +65,12 @@ def load_config(profile=None):
         raise ValueError("本地配置文件格式无效。") from error
     if not isinstance(config, dict):
         raise ValueError("本地配置文件必须是对象。")
-    profiles = config.get("profiles")
-    if not profiles:
+    if "profiles" not in config:
+        name = validate_profile_name(profile or active_profile())
+        if name != "default":
+            raise ValueError("未配置 profile：{}。".format(name))
         return config
+    profiles = config["profiles"]
     if not isinstance(profiles, dict):
         raise ValueError("profiles 必须是 profile 名称到配置对象的映射。")
     for name in profiles:
@@ -218,6 +229,15 @@ def apply_configuration_errors(config, environments=("prod", "test")):
     if (not paas_config.get("apply_contract", {}).get("service_name")
             or any(not fields.get(name) for name in required)):
         errors.append("PaaS apply_contract 未配置完整字段。")
+    if ("prod" in environments and all(fields.get(name) for name in required)
+            and any(not fields.get(name) for name in ("start", "end"))):
+        errors.append("PaaS apply_contract 未配置执行窗口字段。")
+    actions = paas_config.get("task_actions", {})
+    if (not paas_config.get("task_api_base") or not isinstance(actions, dict)
+            or any(not isinstance(actions.get(name), dict)
+                   or not actions[name].get("endpoint") or not actions[name].get("id_field")
+                   for name in ("approve", "execute", "recall"))):
+        errors.append("PaaS 工单操作端点或字段未配置。")
     return errors
 
 
@@ -278,10 +298,12 @@ def is_read_only_select(sql):
     if pairs & {("INTO", "OUTFILE"), ("INTO", "DUMPFILE"), ("FOR", "UPDATE"), ("FOR", "SHARE")}:
         return False
     function_code = _sql_code(sql, preserve_backtick_identifiers=True).upper()
-    function_names = {name for match in re.findall(r"\b([A-Z_]+)\b\s*\(|`([A-Z_]+)`\s*\(", function_code)
-                      for name in match if name}
-    if function_names & _NON_READ_ONLY_SELECT_FUNCTIONS:
-        return False
+    for match in re.finditer(r"(?<![\w$])([\w$]+)\s*\(|`([^`]+)`\s*\(", function_code):
+        name = match.group(1)
+        if (name not in _SAFE_SELECT_FUNCTIONS and name not in _SELECT_GROUPING_KEYWORDS
+                or match.group(2)
+                or function_code[:match.start()].rstrip().endswith(".")):
+            return False
     if re.search(r"\bINTO\s+@|@\s*[A-Z0-9_$]*\s*:=", code.upper()):
         return False
     return not any(tokens[index:index + 4] == ["LOCK", "IN", "SHARE", "MODE"]
@@ -296,10 +318,29 @@ def select_limit(sql):
 
 
 def has_wildcard_projection(sql):
-    """Detect a standalone wildcard in the SELECT list without parsing SQL expressions."""
+    """Detect a standalone wildcard in every SELECT list, including subqueries."""
     code = _sql_code(sql)
-    match = re.match(r"\s*SELECT\s+(.*?)\s+FROM\b", code, re.IGNORECASE | re.DOTALL)
-    return bool(match and re.search(r"(^|,)\s*(?:[`\w]+\.)?\*\s*(?=,|$)", match.group(1)))
+    modifiers = (r"ALL|DISTINCT|DISTINCTROW|HIGH_PRIORITY|STRAIGHT_JOIN|SQL_SMALL_RESULT|"
+                 r"SQL_BIG_RESULT|SQL_BUFFER_RESULT|SQL_NO_CACHE|SQL_CALC_FOUND_ROWS")
+    for select in re.finditer(r"\bSELECT\b", code, re.IGNORECASE):
+        depth, end = 0, len(code)
+        for boundary in re.finditer(r"\b(?:FROM|LIMIT|UNION)\b|[()]", code[select.end():], re.IGNORECASE):
+            token = boundary.group().upper()
+            if token == "(":
+                depth += 1
+            elif token == ")":
+                if depth == 0:
+                    end = select.end() + boundary.start()
+                    break
+                depth -= 1
+            elif depth == 0:
+                end = select.end() + boundary.start()
+                break
+        projection = re.sub(r"^\s*(?:(?:{})\s+)*".format(modifiers), "", code[select.end():end],
+                            flags=re.IGNORECASE)
+        if re.search(r"(^|,)\s*(?:(?:\w+\s*)?\.\s*)*\*\s*(?=,|$)", projection):
+            return True
+    return False
 
 
 def build_session():
@@ -364,13 +405,15 @@ def query(config, service, env, sql, limit=1000):
         return {"error": "PaaS 查询被拒绝。"}
     if not isinstance(data, list):
         return {"error": "PaaS 查询返回结构无效。"}
-    if not data:
-        return {"columns": [], "rows": []}
+    if len(data) != 1:
+        return {"error": "PaaS 查询返回结构无效。"}
     first = data[0]
-    if not isinstance(first, dict):
+    if not isinstance(first, dict) or "columnList" not in first or "rows" not in first:
         return {"error": "PaaS 查询返回结构无效。"}
     columns, rows = first.get("columnList", []), first.get("rows", [])
-    if not isinstance(columns, list) or not isinstance(rows, list):
+    if (not isinstance(columns, list) or not all(isinstance(column, str) for column in columns)
+            or not isinstance(rows, list) or len(rows) > limit
+            or any(not isinstance(row, list) or len(row) != len(columns) for row in rows)):
         return {"error": "PaaS 查询返回结构无效。"}
     return {"columns": columns, "rows": rows}
 

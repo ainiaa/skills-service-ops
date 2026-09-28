@@ -52,11 +52,17 @@
       "must_not": ["已完全确认"]
     },
     {
-      "id": "sensitive-output",
-      "input": "展示排障原始日志和导出数据。",
+      "id": "default-log-output",
+      "input": "展示 orders 最近 15 分钟的 ERROR 日志。",
+      "expected_route": ["sls_query.py"],
+      "required_output": ["原始日志摘要"]
+    },
+    {
+      "id": "redacted-log-output",
+      "input": "展示排障日志，但请脱敏；不要展示导出数据。",
       "expected_route": [],
-      "must_not": ["Cookie", "授权头", "原始敏感日志", "完整导出数据"],
-      "required_output": ["脱敏摘要或导出路径与行数"]
+      "must_not": ["Cookie", "授权头", "完整导出数据"],
+      "required_output": ["脱敏日志摘要"]
     }
   ]
 }

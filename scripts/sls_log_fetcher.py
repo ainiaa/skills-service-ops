@@ -7,7 +7,6 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-import paas
 import sls_query
 
 
@@ -19,7 +18,8 @@ def local_sls_query_script():
     return Path(__file__).with_name("sls_query.py")
 
 
-def build_sls_query_command(script, trace_id, service, env, profile, from_time, to_time, limit, allow_wide_range=False):
+def build_sls_query_command(script, trace_id, service, env, profile, from_time, to_time, limit,
+                            allow_wide_range=False, redact=False):
     command = [sys.executable, str(script), "--trace", trace_id, "--service", service,
                "--from", from_time, "--to", to_time, "--limit", str(limit), "--raw"]
     if env:
@@ -28,6 +28,8 @@ def build_sls_query_command(script, trace_id, service, env, profile, from_time, 
         command.extend(["--profile", profile])
     if allow_wide_range:
         command.append("--allow-wide-range")
+    if redact:
+        command.append("--redact")
     return command
 
 
@@ -40,9 +42,9 @@ def normalize_event(raw):
     else:
         event["time"] = str(timestamp)
     event["level"] = str(raw.get("level", ""))
-    event["message"] = paas.redact_text(raw.get("message", raw.get("content", "")))
+    event["message"] = str(raw.get("message", raw.get("content", "")))
     if raw.get("throwable") is not None:
-        event["throwable"] = paas.redact_text(raw["throwable"])
+        event["throwable"] = str(raw["throwable"])
     return event
 
 
@@ -91,6 +93,7 @@ def main():
     parser.add_argument("--to", default="now")
     parser.add_argument("--limit", type=int, default=100)
     parser.add_argument("--allow-wide-range", action="store_true", help="确认执行超过 1 小时的查询")
+    parser.add_argument("--redact", action="store_true", help="按配置规则脱敏采集的日志")
     args = parser.parse_args()
     if args.limit < 1 or args.limit > sls_query.MAX_QUERY_LIMIT:
         parser.error("--limit 必须为 1 到 {} 的整数。".format(sls_query.MAX_QUERY_LIMIT))
@@ -100,7 +103,7 @@ def main():
     output = {"trace_id": args.trace_id, "profile": profile, "collector": "service-ops", "services": {}}
     for service in services:
         command = build_sls_query_command(script, args.trace_id, service, args.env, args.profile,
-                                          args.from_time, args.to, args.limit, args.allow_wide_range)
+                                          args.from_time, args.to, args.limit, args.allow_wide_range, args.redact)
         fetched = fetch_service(command)
         fetched["logstore"] = service
         output["services"][service] = fetched

@@ -11,11 +11,11 @@ python3 scripts/setup.py --init
 python3 scripts/setup.py --check --capability sls
 ```
 
-`requirements.lock` 是日常安装与 CI 的完整锁定集，已在 Python 3.14/macOS 隔离环境验证。按需检查 `sls`、`paas`、`db`、`export`、`apply` 或全部能力 `all`。
+`requirements.lock` 是日常安装与 CI 的完整锁定集，已在 Python 3.14/macOS 隔离环境验证。按需检查 `sls`、`paas`、`db`、`export`、`apply` 或全部能力 `all`；`apply` 就绪检查包含提交及审批、执行、撤回工单的端点。
 
 ## 配置与凭据
 
-`setup.py --init` 会从 [配置模板](config/settings.yaml.example) 创建权限为 `600` 的 `~/.service-ops/config.yaml`。填写 SLS 的 project/region/endpoint/AK/SK、服务的生产 group 与测试库、PaaS 契约和可选脱敏规则；PaaS 查询成功响应固定为 `[{"columnList": [...], "rows": [...]}]`。
+`setup.py --init` 会从 [配置模板](config/settings.yaml.example) 创建权限为 `600` 的 `~/.service-ops/config.yaml`。填写 SLS 的 project/region/endpoint/AK/SK、服务的生产 group 与测试库、PaaS 契约和可选脱敏规则；SLS 日志默认原样输出，只有显式传 `--redact` 才使用这些规则。PaaS 查询成功响应固定为 `[{"columnList": [...], "rows": [...]}]`。
 
 全部配置与凭据均可填写在该私有文件中；macOS Keychain 的同 profile 凭据优先，配置文件作为兜底。当前不读取任何环境变量。
 
@@ -27,11 +27,12 @@ python3 scripts/setup.py --check --capability sls
 
 ```bash
 python3 scripts/sls_query.py --doctor --service orders --profile default
+python3 scripts/sls_query.py --service orders --from 15m --limit 100
 python3 scripts/sls_query.py --service orders --level ERROR --from 15m --limit 100
 python3 scripts/sls_query.py --dry-run --service orders --query 'TraceId: abc-123' --from 1h
 ```
 
-默认时间范围是 15 分钟；真实查询超过一小时必须先 dry-run，再附加 `--allow-wide-range`。需要 JSONL 时使用 `--jsonl`，单次最多 1000 行。
+不指定 `--level` 时查询所有级别；`--level ERROR` 仅在存在 `level`（或 `content.level`）字段索引时精确筛选 ERROR，无索引会拒绝执行，不会退化为全文搜索。可用 `--doctor` 检查索引；若确实需要全文搜索，显式使用 `--query ERROR`。dry-run 不读取远端索引，带 `--level` 或 `--trace` 的计划会标记索引未验证，`query` 为 `null`、`requested_filters` 保留输入条件，不能当作最终查询语句。默认时间范围是 15 分钟、最新日志优先；需按时间从早到晚查看时传 `--forward`。真实查询超过一小时必须先 dry-run，再附加 `--allow-wide-range`。需要 JSONL 时使用 `--jsonl`，单次最多 1000 行；仅在需要脱敏时附加 `--redact`。
 
 ### TraceId 排障
 
@@ -41,11 +42,11 @@ python3 scripts/sls_log_fetcher.py --trace-id abc-123 --service orders --profile
 python3 scripts/log_analyzer.py < "$tmp_dir/logs.json" > "$tmp_dir/analysis.json"
 ```
 
-`truncated_services` 非空代表证据不完整；采集失败不能解释为无日志。阅读后删除该临时目录。
+`truncated_services` 非空代表证据不完整；采集失败不能解释为无日志。日志默认原样保留；仅在明确要求脱敏时，给采集器和分析器都附加 `--redact`。阅读后删除该临时目录。
 
 ### 数据验证与 Excel 导出
 
-只接受明确服务、环境、用途和 SQL。验证查询必须是显式字段、无副作用的单条 `SELECT`，且 `LIMIT` 不超过 100：
+只接受明确服务、环境、用途和 SQL。验证查询必须是显式字段、无副作用的单条 `SELECT`，且 `LIMIT` 不超过 100；脚本只放行常用的已核准只读函数，其他函数调用会被拒绝。静态 SQL 检查不能替代数据库权限控制，测试库账号及生产 PaaS 查询端点仍须使用只读权限：
 
 ```bash
 python3 scripts/db_query.py --env test --service orders \
@@ -74,11 +75,12 @@ python3 scripts/db_apply.py --env prod --service orders \
   --submit --confirm '<confirmation_token>'
 ```
 
-先核对预检输出的 SQL、group、窗口和 token；`UPDATE`/`DELETE` 必须有顶层 `WHERE`，`DROP`/`TRUNCATE` 还需 `--allow-destructive`。token 一次性消费，失败时先核对工单，不能重放。
+先核对预检输出的 SQL、group、窗口、拆分后的语句顺序和 token；混合 DDL/DML 会保持输入语句顺序拆分提交，但提交顺序不保证平台实际执行顺序。若语句间存在依赖，应拆成多次操作，核实前一工单执行完成后再提交下一工单。`UPDATE`/`DELETE` 必须有顶层 `WHERE`，`DROP`/`TRUNCATE` 还需 `--allow-destructive`。token 一次性消费，失败时先核对工单，不能重放。
 
 ### 使用 profile
 
 默认使用 `default`。其他部署显式使用 `--profile regional`；profile 只能由字母、数字、`-`、`_` 构成并以字母开头。服务、SLS 路由、PaaS 契约及其凭据均来自 Keychain 或私有配置文件，不读取环境变量。
+旧式不含 `profiles` 的扁平配置仅支持 `default`；使用其他 profile 时须在私有配置中建立对应的 `profiles.<name>`，以免路由与凭据混用。
 
 ## 常见问题
 

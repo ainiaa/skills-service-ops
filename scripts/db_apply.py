@@ -117,7 +117,7 @@ def has_top_level_where(statement):
 
 
 def plan_changes(sql_text, allow_destructive=False):
-    plan = {"ddl": [], "dml": []}
+    plan = {"ddl": [], "dml": [], "ordered": []}
     for statement in split_statements(sql_text):
         match = re.search(r"\b([A-Za-z]+)\b", paas._sql_code(statement))
         keyword = match.group(1).upper() if match else ""
@@ -125,10 +125,12 @@ def plan_changes(sql_text, allow_destructive=False):
             if keyword in DESTRUCTIVE_DDL and not allow_destructive:
                 raise ValueError("{} 需要显式传入 --allow-destructive。".format(keyword))
             plan["ddl"].append(statement)
+            plan["ordered"].append(("DDL", statement))
         elif keyword in DML:
             if keyword in {"UPDATE", "DELETE"} and not has_top_level_where(statement):
                 raise ValueError("{} 必须包含 WHERE 条件。".format(keyword))
             plan["dml"].append(statement)
+            plan["ordered"].append(("DML", statement))
         else:
             raise ValueError("不支持提交的 SQL：{}".format(statement[:80]))
     if not plan["ddl"] and not plan["dml"]:
@@ -251,12 +253,17 @@ def _tickets(plan, group, reason, paas_env, env, batch_size, contract):
         (datetime.now() + timedelta(hours=8)).strftime("%Y-%m-%d %H:%M:%S"),
         (datetime.now() + timedelta(hours=10)).strftime("%Y-%m-%d %H:%M:%S"),
     )
-    tickets = []
-    for kind, statements in (("DDL", plan["ddl"]), ("DML", plan["dml"])):
-        for index in range(0, len(statements), batch_size):
-            chunk = statements[index:index + batch_size]
+    tickets, kind, chunk = [], None, []
+    for next_kind, statement in plan["ordered"]:
+        if chunk and (next_kind != kind or len(chunk) == batch_size):
             tickets.append({"kind": kind, "statements": chunk,
                             "body": build_apply_body(chunk, group, reason, paas_env, *(schedule or (None, None)), contract)})
+            chunk = []
+        kind = next_kind
+        chunk.append(statement)
+    if chunk:
+        tickets.append({"kind": kind, "statements": chunk,
+                        "body": build_apply_body(chunk, group, reason, paas_env, *(schedule or (None, None)), contract)})
     return tickets
 
 
@@ -376,10 +383,11 @@ def main():
             raise ValueError("PaaS apply 环境映射未配置。")
     except (OSError, ValueError, ImportError) as error:
         parser.error(str(error))
-    ordered = ["DDL:" + sql for sql in plan["ddl"]] + ["DML:" + sql for sql in plan["dml"]]
+    ordered = ["{}:{}".format(kind, sql) for kind, sql in plan["ordered"]]
     target = {"api_base": paas_config.get("apply_api_base", ""),
               "endpoints": paas_config.get("apply_endpoints", {}),
               "response_id_field": paas_config.get("apply_response_id_field", ""),
+              "environment": paas_env,
               "contract": paas_config.get("apply_contract", {})}
     request = {"profile": paas.active_profile(), "env": args.env, "service": args.service, "group": group,
                "reason": args.reason, "statements": ordered, "batch_size": args.batch_size, "target": target}

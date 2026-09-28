@@ -15,7 +15,7 @@ description: 对已配置服务执行 SLS 日志检索、TraceId 排障、趋势
 
 | 意图 | 请用户提供 |
 |---|---|
-| 查日志 | 服务或 Logstore、环境、时间范围、关键词/级别/TraceId |
+| 查日志 | 服务或 Logstore；未指定时间时默认最近 15 分钟，未指定 profile 时默认 `default`；关键词、级别和 TraceId 均可选，不提供则查所有日志 |
 | TraceId 排障 | TraceId、服务或 Logstore、环境；未给时间时默认最近 15 分钟 |
 | 数据验证 | 服务、环境、用途、单条带 LIMIT 的 SELECT |
 | Excel 导出 | 服务、环境、用途、完整 SQL、绝对输出路径；生产还需当前请求明确授权 |
@@ -36,13 +36,13 @@ description: 对已配置服务执行 SLS 日志检索、TraceId 排障、趋势
 
 1. 数据库验证、导出和变更所需的服务、环境、用途和 SQL 必须由用户明确提供；不得猜测服务、group 或环境。日志检索仅可在当前目录唯一服务映射或显式参数可确定范围时执行，并在结果中说明最终服务与环境。
 2. SLS、PaaS 与测试库的全部配置和凭据均只从权限为 `600` 的私有配置文件或 macOS Keychain（service=`service-ops`）读取；Keychain 中同 profile 的 `sls-ak`、`sls-sk`、`paas-cookie`、`test-db-password` 优先，配置文件兜底。Keychain 读取最多等待 10 秒，错误或超时后回退到同一 profile 的配置文件。禁止写入源码、命令行参数、环境变量或对话输出。
-3. 生产查询、生产导出和任何变更工单都必须先得到用户明确授权。输出不得包含 Cookie、授权头、原始敏感日志或完整导出数据；分析摘要必须保留内置及私有配置的脱敏结果。
+3. 生产查询、生产导出和任何变更工单都必须先得到用户明确授权。输出不得包含 Cookie、授权头或完整导出数据。SLS 日志默认原样输出；仅当用户明确要求脱敏时，才对日志和分析摘要使用 `--redact`。
 4. PaaS 失败属于证据或提交失败，不能当作空结果或成功；只报告可确认的结果。
 5. 工单操作不得由 Skill 的自动匹配、排障上下文或“处理一下”之类的隐含表达触发；必须由用户在当前请求中显式调用 `$skills-service-ops` 并说明提交、审批、立即执行或撤回的具体意图。
 
 ## 结果呈现
 
-每次执行后按以下顺序简要汇报：已执行的服务/环境/时间范围与命令路径、已确认发现或导出行数、证据局限（采集失败、截断、权限或范围不足）以及下一步。不得把未执行的查询当作证据，不展示原始敏感日志或完整导出数据。
+每次执行后按以下顺序简要汇报：已执行的服务/环境/时间范围与命令路径、已确认发现或导出行数、证据局限（采集失败、截断、权限或范围不足）以及下一步。不得把未执行的查询当作证据；SLS 日志是否脱敏遵从用户明确要求，不展示完整导出数据。
 
 ## 排障
 
@@ -59,9 +59,9 @@ python3 <skill-dir>/scripts/log_analyzer.py < "$TMP_DIR/logs.json" > "$TMP_DIR/a
 # 读取并报告分析结果后，删除由 mktemp 创建的临时目录：rm -rf -- "$TMP_DIR"
 ```
 
-首次使用或出现采集失败时，先运行 `python3 <skill-dir>/scripts/sls_query.py --doctor --service "<service-or-logstore>" --profile "<profile>"` 排查权限、路由和索引。doctor 会额外执行最近 5 分钟、最多 1 条且不输出日志内容的只读探针，确认实际日志读取权限。SLS SDK 单次请求限制为 30 秒；macOS/Unix 主线程的整次 SLS 查询以进程级 60 秒定时器中断，TraceId 采集子进程也限制为 60 秒。不支持该定时器的平台会拒绝真实查询而不提供虚假的时限承诺。普通日志与 TraceId 查询未指定时间时默认最近 15 分钟；真实查询超过 1 小时须先用 `sls_query.py --dry-run` 确认范围，再显式传 `--allow-wide-range`。任一服务 `status: error` 时，报告证据采集失败，不得把它解释成无日志；`truncated: true` 时，说明结果可能不完整。只有日志形成具体数据假设后，才执行一条经过确认的非锁定 `SELECT`；查询必须使用显式字段并带不超过 100 行的数值 `LIMIT`。
+首次使用或出现采集失败时，先运行 `python3 <skill-dir>/scripts/sls_query.py --doctor --service "<service-or-logstore>" --profile "<profile>"` 排查权限、路由和索引。doctor 会额外执行最近 5 分钟、最多 1 条且不输出日志内容的只读探针，确认实际日志读取权限。使用 `--level` 时必须有 `level` 或 `content.level` 字段索引，否则真实查询会拒绝执行；不得把级别条件退化为全文搜索。dry-run 不读取远端索引，带 `--level` 的计划标记为索引未验证，执行前用 doctor 核实。SLS SDK 单次请求限制为 30 秒；macOS/Unix 主线程的整次 SLS 查询以进程级 60 秒定时器中断，TraceId 采集子进程也限制为 60 秒。不支持该定时器的平台会拒绝真实查询而不提供虚假的时限承诺。普通日志与 TraceId 查询未指定时间时默认最近 15 分钟、最新日志优先；需要较早日志优先时显式传 `--forward`。真实查询超过 1 小时须先用 `sls_query.py --dry-run` 确认范围，再显式传 `--allow-wide-range`。任一服务 `status: error` 时，报告证据采集失败，不得把它解释成无日志；`truncated: true` 时，说明结果可能不完整。只有日志形成具体数据假设后，才执行一条经过确认的非锁定 `SELECT`；查询必须使用显式字段并带不超过 100 行的数值 `LIMIT`。
 
-采集结果会携带已解析的配置 profile，分析器自动使用同一 profile；手工输入标准 JSON 时可显式传 `--profile <profile>`。最终报告区分“已确认”“待验证”“证据不完整”和“证据采集失败”，并只摘要必要证据；分析摘要中的 `truncated_services` 非空时，必须标记为“证据不完整”。若识别到 `related_services`，先向用户列出候选服务并获得确认，再使用 `sls_log_fetcher.py --related-services <service...>` 扩展采集，不得自动跨服务抓取。数据库验证仅允许单条无副作用 SELECT，且拒绝带反引号的 `GET_LOCK`、`RELEASE_LOCK`、`SLEEP`、`BENCHMARK`、`LOAD_FILE`、`LAST_INSERT_ID` 等函数，以及 `INTO @var`、`@var :=` 等会改变锁、连接状态、资源或读取服务端文件的形式。
+采集结果会携带已解析的配置 profile，分析器自动使用同一 profile；手工输入标准 JSON 时可显式传 `--profile <profile>`。默认保留原始 SLS 日志；只有用户明确要求脱敏时，才在 `sls_query.py`、`sls_log_fetcher.py` 和 `log_analyzer.py` 命令上附加 `--redact`。最终报告区分“已确认”“待验证”“证据不完整”和“证据采集失败”，并只摘要必要证据；分析摘要中的 `truncated_services` 非空时，必须标记为“证据不完整”。若识别到 `related_services`，先向用户列出候选服务并获得确认，再使用 `sls_log_fetcher.py --related-services <service...>` 扩展采集，不得自动跨服务抓取。数据库验证仅允许单条无副作用 SELECT，且拒绝带反引号的 `GET_LOCK`、`RELEASE_LOCK`、`SLEEP`、`BENCHMARK`、`LOAD_FILE`、`LAST_INSERT_ID` 等函数，以及 `INTO @var`、`@var :=` 等会改变锁、连接状态、资源或读取服务端文件的形式。
 
 ## 导出
 
@@ -86,7 +86,7 @@ python3 <skill-dir>/scripts/db_apply.py \
   --reason "<change reason>" --sql-file "<sql-file>"
 ```
 
-预检会输出精确 SQL、PaaS group、工单拆分、执行窗口和 `confirmation_token`，并将该计划以 `600` 权限保存到用户私有目录。计划同时绑定 resolved profile 与 PaaS 提交目标；确认提交先校验 PaaS Cookie，随后才一次性消费 token，并立即将落盘记录收缩为不含 SQL、请求体或工单元数据的消费时间戳标记。SQL、服务、profile、目标或拆分参数变化时必须重新预检；提交失败时先核对 PaaS 工单，不能盲目重试。标记保留七天后会在后续预检时清理。向用户展示这些信息，等待确认完全一致后，才可提交：
+预检会输出精确 SQL、PaaS group、工单拆分、执行窗口和 `confirmation_token`；混合 DDL/DML 按输入顺序拆分并依次提交，不合并跨越不同类型的语句。提交顺序不保证平台实际执行顺序；若语句间存在依赖，拆成多次操作，核实前一工单执行完成后再提交下一工单。预检计划以 `600` 权限保存到用户私有目录。计划同时绑定 resolved profile 与 PaaS 提交目标；确认提交先校验 PaaS Cookie，随后才一次性消费 token，并立即将落盘记录收缩为不含 SQL、请求体或工单元数据的消费时间戳标记。SQL、服务、profile、目标或拆分参数变化时必须重新预检；提交失败时先核对 PaaS 工单，不能盲目重试。标记保留七天后会在后续预检时清理。向用户展示这些信息，要求逐项核对拆分后的语句顺序，等待确认完全一致后，才可提交：
 
 ```bash
 python3 <skill-dir>/scripts/db_apply.py \

@@ -16,7 +16,7 @@ def is_incident_query(sql):
 
 
 def query_prod(sql, service, config):
-    return paas.query(config, service, "prod", sql)
+    return paas.query(config, service, "prod", sql, paas.select_limit(sql))
 
 
 def query_test(sql, database, config):
@@ -70,6 +70,9 @@ def main():
         result = query_prod(args.sql, args.service, config) if args.env == "prod" else query_test(args.sql, service.get("test_database", ""), config)
     except (ImportError, OSError, ValueError) as error:
         paas.print_json({"error": str(error)}, stream=sys.stderr)
+        raise SystemExit(2)
+    if result.get("error"):
+        paas.print_json(result, stream=sys.stderr)
         raise SystemExit(2)
     paas.print_json({"purpose": args.purpose, **result})
 

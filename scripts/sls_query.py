@@ -25,6 +25,10 @@ SLS_REQUEST_TIMEOUT_SECONDS = 30
 SLS_QUERY_DEADLINE_SECONDS = 60
 
 
+class IncompleteSlsResult(RuntimeError):
+    pass
+
+
 def supports_hard_deadline():
     return (hasattr(signal, "setitimer") and hasattr(signal, "SIGALRM")
             and threading.current_thread() is threading.main_thread())
@@ -97,15 +101,25 @@ def build_index_aware_query(query, trace, terms, level, indexed_fields):
     parts.extend(quote_full_text(term) for term in terms if term)
     if level:
         field = next((key for key in ("level", "content.level") if key in indexed_fields), None)
-        parts.append("{}: {}".format(field, level) if field else level)
-        used_index = used_index or bool(field)
+        if not field:
+            raise ValueError("严格 --level 筛选需要 level 字段索引；请用 --doctor 检查索引，或改用 --query 明确执行全文查询。")
+        parts.append("{}: {}".format(field, level))
+        used_index = True
     return " and ".join(parts) or "*", "indexed" if used_index else "fulltext"
 
 
 def get_indexed_fields(response):
     body = response.get_body() if hasattr(response, "get_body") else response
     keys = body.get("keys", {}) if isinstance(body, dict) else {}
-    return set(keys) if isinstance(keys, dict) else set()
+    if not isinstance(keys, dict):
+        return set()
+    indexed = set(keys)
+    for key, config in keys.items():
+        if isinstance(config, dict) and config.get("type") == "json":
+            json_keys = config.get("json_keys", {})
+            if isinstance(json_keys, dict):
+                indexed.update("{}.{}".format(key, child) for child in json_keys)
+    return indexed
 
 
 def truncation_metadata(log_count, limit, page=None, offset=None):
@@ -164,7 +178,9 @@ def flatten_contents(raw):
         try:
             parsed = json.loads(content)
             if isinstance(parsed, dict):
-                flat.update(parsed)
+                flat.update({key: value for key, value in parsed.items() if key not in _META_KEYS})
+            else:
+                flat["content"] = content
         except ValueError:
             flat["content"] = content
     elif content is not None:
@@ -194,6 +210,11 @@ def call_with_deadline(client, started, monotonic, method, *args, **kwargs):
     return result
 
 
+def require_complete_result(response):
+    if not response.is_completed():
+        raise IncompleteSlsResult("SLS 查询结果不完整；请缩小范围后重试。")
+
+
 def doctor_result(client, project, logstore, now=None, monotonic=time.monotonic, deadline_started=None):
     """Check metadata and perform one bounded read without exposing a log payload."""
     to_time = int(now if now is not None else time.time())
@@ -201,8 +222,9 @@ def doctor_result(client, project, logstore, now=None, monotonic=time.monotonic,
     started = monotonic() if deadline_started is None else deadline_started
     call_with_deadline(client, started, monotonic, "get_logstore", project, logstore)
     indexed = get_indexed_fields(call_with_deadline(client, started, monotonic, "get_index_config", project, logstore))
-    response = call_with_deadline(client, started, monotonic, "get_logs", project, logstore, from_time, to_time,
-                                  query="*", line=1, offset=0, reverse=True)
+    response = call_with_deadline(client, started, monotonic, "get_log", project, logstore, from_time, to_time,
+                                  query="*", size=1, offset=0, reverse=True)
+    require_complete_result(response)
     logs = response.get_logs()
     return {"status": "ok", "project": project, "logstore": logstore,
             "indexed_fields": sorted(indexed), "read_probe": {"line_limit": 1,
@@ -212,7 +234,7 @@ def doctor_result(client, project, logstore, now=None, monotonic=time.monotonic,
 def dry_run_result(args, from_time, to_time, query, query_mode):
     """Describe a bounded query without loading configuration or contacting SLS."""
     offset = args.offset if args.offset is not None else ((args.page or 1) - 1) * args.limit
-    return {
+    result = {
         "status": "dry_run",
         "execution": False,
         "profile": args.profile,
@@ -224,11 +246,15 @@ def dry_run_result(args, from_time, to_time, query, query_mode):
         "limit": args.limit,
         "offset": offset,
         "reverse": args.reverse,
-        "next_step": "确认范围和查询后，移除 --dry-run 再执行。",
+        "next_step": ("先用 --doctor 确认字段索引和最终查询模式，再移除 --dry-run 执行。" if args.level or args.trace
+                      else "确认范围和查询后，移除 --dry-run 再执行。"),
     }
+    if args.level or args.trace:
+        result["requested_filters"] = {"trace": args.trace, "terms": args.terms, "level": args.level}
+    return result
 
 
-def fetch_logs(client, project, logstore, from_time, to_time, query, limit, offset=0, reverse=False,
+def fetch_logs(client, project, logstore, from_time, to_time, query, limit, offset=0, reverse=True,
                monotonic=time.monotonic, deadline_started=None):
     """Collect a bounded page sequence without exceeding the query deadline."""
     started, logs = (monotonic() if deadline_started is None else deadline_started), []
@@ -241,6 +267,7 @@ def fetch_logs(client, project, logstore, from_time, to_time, query, limit, offs
             page = next(pages)
         except StopIteration:
             break
+        require_complete_result(page)
         logs.extend(page.get_logs())
         set_remaining_request_timeout(client, started, monotonic)
     return logs[:limit]
@@ -265,10 +292,13 @@ def build_parser():
     pagination.add_argument("--page", type=int)
     pagination.add_argument("--offset", type=int)
     parser.add_argument("--timezone", default="Asia/Singapore")
-    parser.add_argument("--reverse", action="store_true")
+    ordering = parser.add_mutually_exclusive_group()
+    ordering.add_argument("--reverse", dest="reverse", action="store_true", default=True, help="最新日志优先（默认）")
+    ordering.add_argument("--forward", dest="reverse", action="store_false", help="较早日志优先")
     parser.add_argument("--allow-wide-range", action="store_true", help="确认执行超过 1 小时的查询")
-    parser.add_argument("--raw", "--jsonl", dest="jsonl", action="store_true", help="输出脱敏 JSONL")
+    parser.add_argument("--raw", "--jsonl", dest="jsonl", action="store_true", help="输出 JSONL")
     parser.add_argument("--analysis", dest="jsonl", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--redact", action="store_true", help="按配置规则脱敏日志输出")
     parser.add_argument("--doctor", action="store_true")
     parser.add_argument("--dry-run", action="store_true", help="仅输出查询计划，不读取配置、凭据或 SLS")
     return parser
@@ -292,7 +322,10 @@ def main():
     except ValueError as error:
         parser.error(str(error))
     if args.dry_run:
-        query, query_mode = build_index_aware_query(args.query, args.trace, args.terms, args.level, set())
+        if args.level or args.trace:
+            query, query_mode = None, "index_unverified"
+        else:
+            query, query_mode = build_index_aware_query(args.query, args.trace, args.terms, args.level, set())
         print(json.dumps(dry_run_result(args, from_ts, to_ts, query, query_mode), ensure_ascii=False))
         return
     if to_ts - from_ts > MAX_UNACKNOWLEDGED_RANGE_SECONDS and not args.allow_wide_range:
@@ -303,7 +336,7 @@ def main():
             try:
                 timezone = ZoneInfo(args.timezone)
                 config = paas.load_config(args.profile)
-                redaction_patterns = paas.log_analysis_rules(config)["redaction_patterns"]
+                redaction_patterns = paas.log_analysis_rules(config)["redaction_patterns"] if args.redact else ()
                 project, region, endpoint = resolve_connection(args.profile, args.project, args.region, args.endpoint, config)
                 access_key, access_secret = get_credentials(args.profile, config)
                 client = require_sdk()(endpoint or "{}.log.aliyuncs.com".format(region), access_key, access_secret)
@@ -317,6 +350,8 @@ def main():
                     result = doctor_result(client, project, args.logstore, deadline_started=query_started)
                 except TimeoutError:
                     parser.error("SLS doctor 超过 {} 秒；请缩小范围后重试。".format(SLS_QUERY_DEADLINE_SECONDS))
+                except IncompleteSlsResult as error:
+                    parser.error(str(error))
                 except Exception as error:
                     parser.error("SLS doctor 失败：{}".format(type(error).__name__))
                 print(json.dumps(result, ensure_ascii=False))
@@ -328,13 +363,18 @@ def main():
                 parser.error("SLS 查询超过 {} 秒；请缩小范围后重试。".format(SLS_QUERY_DEADLINE_SECONDS))
             except Exception:
                 indexed = set()
-            args.query, _ = build_index_aware_query(args.query, args.trace, args.terms, args.level, indexed)
+            try:
+                args.query, _ = build_index_aware_query(args.query, args.trace, args.terms, args.level, indexed)
+            except ValueError as error:
+                parser.error(str(error))
             offset = args.offset if args.offset is not None else ((args.page or 1) - 1) * args.limit
             try:
                 logs = fetch_logs(client, project, args.logstore, from_ts, to_ts, args.query, args.limit,
                                   offset=offset, reverse=args.reverse, deadline_started=query_started)
             except TimeoutError:
                 parser.error("SLS 查询超过 {} 秒；请缩小范围后重试。".format(SLS_QUERY_DEADLINE_SECONDS))
+            except IncompleteSlsResult as error:
+                parser.error(str(error))
             except Exception as error:
                 parser.error("SLS API 失败：{}".format(type(error).__name__))
     except TimeoutError:
@@ -343,7 +383,8 @@ def main():
         parser.error(str(error))
     for log in logs[:args.limit]:
         flat, timestamp = flatten_contents(dict(log.get_contents())), log.get_time()
-        flat = paas.redact_log_fields(flat, redaction_patterns)
+        if args.redact:
+            flat = paas.redact_log_fields(flat, redaction_patterns)
         if args.jsonl:
             print(json.dumps({"_time_": timestamp, **flat}, ensure_ascii=False))
         else:

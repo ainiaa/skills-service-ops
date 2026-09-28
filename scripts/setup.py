@@ -40,6 +40,11 @@ def missing_dependencies(capability="all"):
 
 
 def check_readiness(capability="all", profile=None, service=None):
+    if profile is not None:
+        try:
+            paas.validate_profile_name(profile)
+        except ValueError as error:
+            return [str(error)]
     missing = missing_dependencies(capability)
     errors = ["缺少 Python 依赖：{}".format(", ".join(missing))] if missing else []
     config = None

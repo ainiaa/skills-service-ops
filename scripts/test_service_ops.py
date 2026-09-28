@@ -59,22 +59,81 @@ class ReadOnlyQueryTests(unittest.TestCase):
         self.assertFalse(db_query.is_incident_query(sql))
         self.assertFalse(db_export.is_export_query(sql))
 
+    def test_query_and_export_reject_unverified_sql_functions(self):
+        for sql in (
+            "SELECT mutate_orders(id) AS result FROM orders LIMIT 1",
+            "SELECT app.mutate_orders(id) AS result FROM orders LIMIT 1",
+            "SELECT `mutate_orders`(id) AS result FROM orders LIMIT 1",
+            "SELECT `mutate``orders`(id) AS result FROM orders LIMIT 1",
+            "SELECT mutate$COUNT(id) AS result FROM orders LIMIT 1",
+            "SELECT 写入(id) AS result FROM orders LIMIT 1",
+        ):
+            with self.subTest(sql=sql):
+                self.assertFalse(db_query.is_incident_query(sql))
+                self.assertFalse(db_export.is_export_query(sql))
+        self.assertTrue(db_query.is_incident_query("SELECT COUNT(id) AS total FROM orders LIMIT 1"))
+        self.assertTrue(db_query.is_incident_query(
+            "SELECT (price * quantity) AS total FROM orders WHERE (id = 1) LIMIT 1"))
+        for function in ("IF(status=1, 1, 0)", "LEFT(name, 3)", "RIGHT(name, 3)",
+                         "REPLACE(name, 'a', 'b')"):
+            with self.subTest(function=function):
+                self.assertTrue(db_query.is_incident_query(
+                    "SELECT {} AS value FROM orders LIMIT 1".format(function)))
+
     def test_export_requires_a_numeric_limit(self):
         self.assertTrue(db_export.is_export_query("SELECT id FROM orders LIMIT 10"))
         self.assertFalse(db_export.is_export_query("SELECT id FROM orders"))
 
     def test_incident_query_requires_named_columns_and_a_small_limit(self):
         self.assertTrue(db_query.is_incident_query("SELECT id, status FROM orders LIMIT 10"))
+        self.assertTrue(db_query.is_incident_query("SELECT price * quantity AS total FROM orders LIMIT 10"))
         for sql in (
             "SELECT * FROM orders LIMIT 10",
+            "SELECT DISTINCT * FROM orders LIMIT 10",
+            "SELECT HIGH_PRIORITY * FROM orders LIMIT 10",
+            "SELECT DISTINCT HIGH_PRIORITY SQL_SMALL_RESULT * FROM orders LIMIT 10",
+            "SELECT DISTINCT orders.* FROM orders LIMIT 10",
+            "SELECT `orders`.* FROM orders LIMIT 10",
+            "SELECT db.orders.* FROM db.orders LIMIT 10",
+            "SELECT `x FROM y`, * FROM orders LIMIT 10",
             "SELECT id FROM orders",
             "SELECT id FROM orders LIMIT 101",
         ):
             with self.subTest(sql=sql):
                 self.assertFalse(db_query.is_incident_query(sql))
 
+    def test_incident_query_rejects_wildcards_in_later_select_clauses(self):
+        for sql in (
+            "SELECT id, name FROM users UNION SELECT * FROM users LIMIT 1",
+            "SELECT id FROM users WHERE EXISTS (SELECT * FROM audit) LIMIT 1",
+            "SELECT * LIMIT 1",
+            "SELECT (SELECT id FROM users LIMIT 1) AS x, users.* FROM users LIMIT 1",
+        ):
+            with self.subTest(sql=sql):
+                self.assertFalse(db_query.is_incident_query(sql))
+        self.assertTrue(db_query.is_incident_query("SELECT COUNT(*) AS total FROM users LIMIT 1"))
+
+    def test_read_only_join_using_is_not_treated_as_a_function(self):
+        sql = "SELECT a.id FROM a JOIN b USING (id) LIMIT 1"
+        self.assertTrue(db_query.is_incident_query(sql))
+        self.assertTrue(db_export.is_export_query(sql))
+
 
 class ExportTests(unittest.TestCase):
+    def test_prod_query_reports_paas_error_as_failure(self):
+        config = {"services": {"orders": {"prod_db_group": "orders-db"}}}
+        with patch.object(paas, "set_active_profile"), \
+             patch.object(paas, "load_config", return_value=config), \
+             patch.object(paas, "query", return_value={"error": "PaaS 查询请求失败。"}), \
+             patch.object(sys, "argv", ["db_query.py", "--env", "prod", "--service", "orders",
+                                         "--purpose", "核对订单", "--sql", "SELECT id FROM orders LIMIT 1"]), \
+             redirect_stdout(io.StringIO()) as stdout, redirect_stderr(io.StringIO()) as stderr, \
+             self.assertRaises(SystemExit) as exited:
+            db_query.main()
+        self.assertEqual(exited.exception.code, 2)
+        self.assertEqual(stdout.getvalue(), "")
+        self.assertIn("PaaS 查询请求失败。", stderr.getvalue())
+
     def test_database_commands_require_a_purpose(self):
         commands = (
             (db_query.main, ["db_query.py", "--env", "prod", "--service", "orders",
@@ -184,6 +243,16 @@ class ExportTests(unittest.TestCase):
 
 
 class ApplyTests(unittest.TestCase):
+    def test_mixed_apply_tickets_preserve_sql_order(self):
+        sql = ("INSERT INTO orders(id) VALUES (1); "
+               "ALTER TABLE orders ADD COLUMN note VARCHAR(10); "
+               "UPDATE orders SET note = 'ok' WHERE id = 1;")
+        contract = {"service_name": "service-ops", "fields": {
+            "sql": "sql", "service": "service", "group": "group", "reason": "reason", "envs": "envs"}}
+        tickets = db_apply._tickets(db_apply.plan_changes(sql), "orders-db", "repair", "production", "test", 2000, contract)
+        self.assertEqual([ticket["kind"] for ticket in tickets], ["DML", "DDL", "DML"])
+        self.assertEqual([ticket["statements"][0].split()[0] for ticket in tickets], ["INSERT", "ALTER", "UPDATE"])
+
     def test_apply_rejects_non_mutating_sql(self):
         with self.assertRaises(ValueError):
             db_apply.plan_changes("SELECT id FROM orders;")
@@ -424,6 +493,44 @@ class ApplyTests(unittest.TestCase):
         self.assertIn("预检计划不一致", stderr.getvalue())
         self.assertEqual(submitted, [])
 
+    def test_submit_rejects_a_preflight_when_the_apply_environment_changes(self):
+        submitted = []
+
+        class Session:
+            def post(self, *_args, **_kwargs):
+                submitted.append(True)
+                return type("Response", (), {"raise_for_status": lambda self: None,
+                                            "json": lambda self: {"id": 1}})()
+
+        sql = "UPDATE orders SET status = 1 WHERE id = 1;"
+        config = {"services": {"orders": {"prod_db_group": "orders-db"}}, "paas": {
+            "apply_envs": {"test": "testing"}, "apply_api_base": "https://example.invalid",
+            "apply_endpoints": {"ddl": "ddl", "dml": "dml"}, "apply_response_id_field": "id",
+            "apply_contract": {"service_name": "service-ops", "fields": {
+                "sql": "sql", "service": "service", "group": "group", "reason": "reason", "envs": "envs",
+            }},
+        }}
+        base = ["db_apply.py", "--env", "test", "--service", "orders", "--reason", "repair", "--sql", sql]
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.object(paas, "CONFIG_PATH", Path(directory) / "config.yaml"), \
+             patch.object(paas, "set_active_profile"), \
+             patch.object(paas, "load_config", return_value=config), \
+             patch.object(paas, "get_cookie", return_value="cookie"), \
+             patch.object(paas, "build_session", return_value=Session()):
+            with patch.object(sys, "argv", base), redirect_stdout(io.StringIO()) as output:
+                db_apply.main()
+                token = json.loads(output.getvalue())["confirmation_token"]
+            config["paas"]["apply_envs"]["test"] = "different-testing"
+            with patch.object(sys, "argv", base + ["--submit", "--confirm", token]), \
+                 redirect_stdout(io.StringIO()), \
+                 redirect_stderr(io.StringIO()) as stderr, \
+                 self.assertRaises(SystemExit) as exited:
+                db_apply.main()
+            self.assertEqual(db_apply.load_preflight(token)["tickets"][0]["body"]["envs"], ["testing"])
+        self.assertEqual(exited.exception.code, 2)
+        self.assertIn("预检计划不一致", stderr.getvalue())
+        self.assertEqual(submitted, [])
+
     def test_submit_consumes_a_confirmation_token_after_the_first_post(self):
         calls = []
 
@@ -633,7 +740,8 @@ class ApplyTests(unittest.TestCase):
         request = {"profile": paas.active_profile(), "env": "prod", "service": "orders", "group": "orders-db",
                    "reason": "repair", "statements": ["DML:" + sql], "batch_size": 2000,
                    "target": {"api_base": "https://example.invalid", "endpoints": {"ddl": "ddl", "dml": "dml"},
-                              "response_id_field": "id", "contract": config["paas"]["apply_contract"]}}
+                              "response_id_field": "id", "environment": "production",
+                              "contract": config["paas"]["apply_contract"]}}
         tickets = db_apply._tickets(plan, "orders-db", "repair", "production", "prod", 2000,
                                     config["paas"]["apply_contract"])
         token = db_apply.confirmation_token("prod", "orders", "orders-db", "repair",
@@ -657,6 +765,55 @@ class ApplyTests(unittest.TestCase):
 
 
 class DatabaseRoutingTests(unittest.TestCase):
+    def test_flat_configuration_does_not_reuse_default_routing_for_another_profile(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "config.yaml"
+            config_path.write_text("paas:\n  query_api_url: https://default.invalid/query\n", encoding="utf-8")
+            config_path.chmod(0o600)
+            with patch.object(paas, "CONFIG_PATH", config_path):
+                self.assertEqual(paas.load_config("default")["paas"]["query_api_url"],
+                                 "https://default.invalid/query")
+                with self.assertRaisesRegex(ValueError, "未配置 profile：regional"):
+                    paas.load_config("regional")
+                config_path.write_text("profiles: {}\n", encoding="utf-8")
+                with self.assertRaisesRegex(ValueError, "未配置 profile：default"):
+                    paas.load_config("default")
+                config_path.write_text("profiles:\n  regional:\n    paas:\n"
+                                       "      query_api_url: https://regional.invalid/query\n", encoding="utf-8")
+                self.assertEqual(paas.load_config("regional")["paas"]["query_api_url"],
+                                 "https://regional.invalid/query")
+
+    def test_prod_query_uses_the_sql_limit_as_its_paas_result_cap(self):
+        sql = "SELECT id FROM orders LIMIT 7"
+        config = {"services": {"orders": {"prod_db_group": "orders-db"}}}
+        with patch.object(paas, "query", return_value={"columns": ["id"], "rows": []}) as query:
+            db_query.query_prod(sql, "orders", config)
+        query.assert_called_once_with(config, "orders", "prod", sql, 7)
+
+    def test_prod_query_rejects_a_paas_response_beyond_the_sql_limit(self):
+        class Response:
+            def raise_for_status(self):
+                pass
+
+            def json(self):
+                return [{"columnList": ["id"], "rows": [[index] for index in range(8)]}]
+
+        class Session:
+            def post(self, _url, **kwargs):
+                self.payload = kwargs["json"]
+                return Response()
+
+        session = Session()
+        config = {"services": {"orders": {"prod_db_group": "orders-db"}}, "paas": {
+            "query_api_url": "https://example.invalid/query", "query_envs": {"prod": "production"},
+            "query_contract": {"fields": {"group": "group", "env": "env", "sql": "sql", "limit": "limit"}},
+        }}
+        with patch.object(paas, "get_cookie", return_value="cookie"), \
+             patch.object(paas, "build_session", return_value=session):
+            result = db_query.query_prod("SELECT id FROM orders LIMIT 7", "orders", config)
+        self.assertEqual(session.payload["limit"], 7)
+        self.assertEqual(result, {"error": "PaaS 查询返回结构无效。"})
+
     def test_runtime_profile_does_not_come_from_environment(self):
         with patch.dict(os.environ, {"SERVICE_OPS_PROFILE": "regional"}, clear=False):
             paas.set_active_profile(None)
@@ -789,6 +946,15 @@ class DatabaseRoutingTests(unittest.TestCase):
             response.data = {"unexpected": "object"}
             self.assertEqual(paas.query(config, "orders", "prod", "SELECT id FROM orders LIMIT 1"),
                              {"error": "PaaS 查询返回结构无效。"})
+            for invalid in ([], [{}], [{"columnList": ["id"]}, {"columnList": ["id"], "rows": [[1]]}],
+                            [{"columnList": ["id"], "rows": []}, {"columnList": ["id"], "rows": [[1]]}],
+                            [{"columnList": ["id"], "rows": [[1, 2]]}],
+                            [{"columnList": [1], "rows": [[1]]}],
+                            [{"columnList": ["id"], "rows": [[1], [2]]}]):
+                with self.subTest(response=invalid):
+                    response.data = invalid
+                    self.assertEqual(paas.query(config, "orders", "prod", "SELECT id FROM orders LIMIT 1", limit=1),
+                                     {"error": "PaaS 查询返回结构无效。"})
 
     def test_load_config_rejects_invalid_yaml_and_non_mapping_root(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -964,7 +1130,25 @@ class SetupTests(unittest.TestCase):
                 "PaaS apply 提交端点或响应标识字段未配置。",
                 "PaaS apply 环境映射未配置：prod、test。",
                 "PaaS apply_contract 未配置完整字段。",
+                "PaaS 工单操作端点或字段未配置。",
             ])
+
+    def test_apply_readiness_checks_existing_ticket_actions(self):
+        config = {"paas": {"apply_api_base": "https://example.invalid", "apply_response_id_field": "id",
+                           "apply_endpoints": {"ddl": "ddl", "dml": "dml"},
+                           "apply_envs": {"prod": "production", "test": "testing"},
+                           "apply_contract": {"service_name": "service-ops", "fields": {
+                               "sql": "sql", "service": "service", "group": "group", "reason": "reason", "envs": "envs",
+                           }}}}
+        self.assertEqual(paas.apply_configuration_errors(config), [
+            "PaaS apply_contract 未配置执行窗口字段。", "PaaS 工单操作端点或字段未配置。",
+        ])
+        config["paas"]["task_api_base"] = "https://example.invalid"
+        config["paas"]["task_actions"] = {name: {"endpoint": name, "id_field": "id"}
+                                          for name in ("approve", "execute", "recall")}
+        self.assertEqual(paas.apply_configuration_errors(config), ["PaaS apply_contract 未配置执行窗口字段。"])
+        config["paas"]["apply_contract"]["fields"].update({"start": "start", "end": "end"})
+        self.assertEqual(paas.apply_configuration_errors(config), [])
 
     def test_check_readiness_checks_the_requested_test_service_database(self):
         config = {"test_db": {"host": "db.example.invalid", "user": "readonly"},
@@ -988,6 +1172,16 @@ class SetupTests(unittest.TestCase):
              patch.object(paas, "get_test_db_password", return_value=""), \
              patch.object(setup, "missing_dependencies", return_value=[]):
             self.assertEqual(setup.check_readiness("db", service="orders"), ["测试库密码未配置。"])
+
+    def test_check_readiness_rejects_invalid_profile_before_accessing_credentials(self):
+        with patch.object(paas, "load_config", side_effect=AssertionError("不应读取配置")) as load_config, \
+             patch.object(paas, "get_cookie", side_effect=AssertionError("不应读取凭据")) as get_cookie, \
+             patch.object(setup, "missing_dependencies", return_value=[]):
+            errors = setup.check_readiness("paas", profile="bad name")
+        self.assertEqual(len(errors), 1)
+        self.assertIn("profile", errors[0])
+        load_config.assert_not_called()
+        get_cookie.assert_not_called()
 
     def test_setup_rejects_service_check_for_a_non_database_capability(self):
         with patch.object(sys, "argv", ["setup.py", "--check", "--capability", "sls", "--service", "orders"]), \
@@ -1018,6 +1212,26 @@ class SetupTests(unittest.TestCase):
                                  "--capability", "unknown"], capture_output=True, text=True)
         self.assertEqual(result.returncode, 2)
         self.assertIn("用法：", result.stderr)
+
+    def test_install_checks_credentials_and_does_not_suggest_env_cookie(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / ".service-ops").mkdir()
+            (root / ".service-ops" / "config.yaml").write_text("profiles: {}\n", encoding="utf-8")
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            capture = root / "args.txt"
+            fake_python = bin_dir / "python3"
+            fake_python.write_text("#!/usr/bin/env bash\nprintf '%s\\n' \"$*\" >> \"$CAPTURE_FILE\"\n", encoding="utf-8")
+            fake_python.chmod(0o700)
+            environment = {**os.environ, "HOME": str(root), "PATH": str(bin_dir) + os.pathsep + os.environ["PATH"],
+                           "CAPTURE_FILE": str(capture)}
+            result = subprocess.run(["bash", str(Path(__file__).parent.parent / "install.sh"), "--capability", "paas"],
+                                    capture_output=True, text=True, errors="replace", env=environment)
+            calls = capture.read_text(encoding="utf-8") if capture.exists() else ""
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("--check --capability paas", calls)
+        self.assertNotIn("PAAS_COOKIE", result.stdout + result.stderr)
 
     def test_missing_dependencies_reports_all_runtime_modules(self):
         def find_spec(name):
@@ -1137,8 +1351,8 @@ class LocalSlsQueryTests(unittest.TestCase):
 
     def test_sls_dry_run_supports_trace_level_and_keyword_inputs(self):
         cases = (
-            (["--trace", "trace-1"], '"trace-1"'),
-            (["--level", "ERROR"], "ERROR"),
+            (["--trace", "trace-1"], None),
+            (["--level", "ERROR"], None),
             (["timeout"], '"timeout"'),
         )
         for arguments, expected_query in cases:
@@ -1166,7 +1380,10 @@ class LocalSlsQueryTests(unittest.TestCase):
             self.assertIn(message, stderr.getvalue())
 
     def test_sls_query_defaults_to_a_narrow_raw_log_window(self):
-        self.assertEqual(sls_query.build_parser().parse_args([]).from_time, "15m")
+        parser = sls_query.build_parser()
+        self.assertEqual(parser.parse_args([]).from_time, "15m")
+        self.assertTrue(parser.parse_args([]).reverse)
+        self.assertFalse(parser.parse_args(["--forward"]).reverse)
 
     def test_sls_query_configures_the_sdk_request_timeout(self):
         class Client:
@@ -1225,6 +1442,30 @@ class LocalSlsQueryTests(unittest.TestCase):
         with self.assertRaises(TimeoutError):
             sls_query.fetch_logs(client, "project", "orders", 0, 1, "*", 100, monotonic=lambda: next(clock))
 
+    def test_sls_query_rejects_an_incomplete_sdk_page(self):
+        page = type("Page", (), {"get_logs": lambda self: [], "is_completed": lambda self: False})()
+        client = type("Client", (), {"get_log_all": lambda self, *_args, **_kwargs: iter([page])})()
+        with self.assertRaisesRegex(RuntimeError, "不完整"):
+            sls_query.fetch_logs(client, "project", "orders", 0, 1, "*", 100)
+
+    def test_sls_query_reports_incomplete_pages_without_printing_partial_logs(self):
+        page = type("Page", (), {"get_logs": lambda self: [],
+                                  "is_completed": lambda self: False})()
+        client = types.SimpleNamespace(timeout=None, get_index_config=lambda *_args: {"keys": {}},
+                                       get_log_all=lambda *_args, **_kwargs: iter([page]))
+        config = {"sls": {"project": "project", "region": "region"}}
+        with patch.object(paas, "load_config", return_value=config), \
+             patch.object(sls_query, "get_credentials", return_value=("ak", "sk")), \
+             patch.object(sls_query, "require_sdk", return_value=lambda *_args: client), \
+             patch.object(sys, "argv", ["sls_query.py", "--service", "orders"]), \
+             redirect_stdout(io.StringIO()) as stdout, redirect_stderr(io.StringIO()) as stderr, \
+             self.assertRaises(SystemExit) as exited:
+            sls_query.main()
+        self.assertEqual(exited.exception.code, 2)
+        self.assertEqual(stdout.getvalue(), "")
+        self.assertIn("不完整", stderr.getvalue())
+        self.assertNotIn("Traceback", stderr.getvalue())
+
     def test_sls_sdk_requirement_is_constrained_to_the_verified_minor_version(self):
         requirements = (Path(__file__).parent.parent / "requirements.txt").read_text(encoding="utf-8")
         self.assertIn("aliyun-log-python-sdk>=0.9.50,<0.10", requirements)
@@ -1253,11 +1494,104 @@ class LocalSlsQueryTests(unittest.TestCase):
         with patch.object(sls_query.paas, "active_profile", return_value="regional"):
             self.assertEqual(sls_query.resolve_profile(None, None), "regional")
 
-    def test_sls_query_falls_back_to_full_text_when_indexes_are_unavailable(self):
-        self.assertEqual(
-            sls_query.build_index_aware_query(None, "trace-1", [], "ERROR", set()),
-            ('"trace-1" and ERROR', "fulltext"),
-        )
+    def test_sls_query_requires_a_field_index_for_exact_level_filtering(self):
+        with self.assertRaisesRegex(ValueError, "level.*索引"):
+            sls_query.build_index_aware_query(None, "trace-1", [], "ERROR", set())
+        self.assertEqual(sls_query.build_index_aware_query(None, "trace-1", [], "ERROR", {"level"}),
+                         ('"trace-1" and level: ERROR', "indexed"))
+
+    def test_sls_dry_run_marks_level_filter_as_unverified_without_index_metadata(self):
+        with patch.object(sys, "argv", ["sls_query.py", "--dry-run", "--service", "orders", "--level", "ERROR"]), \
+             redirect_stdout(io.StringIO()) as output:
+            sls_query.main()
+        result = json.loads(output.getvalue())
+        self.assertEqual(result["query_mode"], "index_unverified")
+        self.assertIsNone(result["query"])
+        self.assertEqual(result.get("requested_filters"), {"trace": None, "terms": [], "level": "ERROR"})
+
+    def test_sls_dry_run_marks_trace_filter_as_unverified_without_index_metadata(self):
+        with patch.object(sys, "argv", ["sls_query.py", "--dry-run", "--service", "orders", "--trace", "trace-1"]), \
+             redirect_stdout(io.StringIO()) as output:
+            sls_query.main()
+        result = json.loads(output.getvalue())
+        self.assertEqual(result["query_mode"], "index_unverified")
+        self.assertIsNone(result["query"])
+        self.assertEqual(result.get("requested_filters"), {"trace": "trace-1", "terms": [], "level": None})
+
+    def test_sls_detects_indexed_json_subfields(self):
+        index = {"keys": {"level": {"type": "text"}, "content": {
+            "type": "json", "json_keys": {"level": {"type": "text"}, "traceId": {"type": "text"}},
+        }}}
+        self.assertEqual(sls_query.get_indexed_fields(index), {"level", "content.level", "content.traceId", "content"})
+        self.assertEqual(sls_query.build_index_aware_query(None, None, [], "ERROR", {"content.level"}),
+                         ("content.level: ERROR", "indexed"))
+
+    def test_sls_level_query_fails_closed_when_index_is_unavailable(self):
+        class Client:
+            timeout = None
+            def get_index_config(self, *_args):
+                return {"keys": {}}
+            def get_log_all(self, *_args, **_kwargs):
+                raise AssertionError("不应执行非精确级别查询")
+        config = {"sls": {"project": "project", "region": "region"}}
+        with patch.object(paas, "load_config", return_value=config), \
+             patch.object(sls_query, "get_credentials", return_value=("ak", "sk")), \
+             patch.object(sls_query, "require_sdk", return_value=lambda *_args: Client()), \
+             patch.object(sys, "argv", ["sls_query.py", "--service", "orders", "--level", "ERROR"]), \
+             redirect_stderr(io.StringIO()) as stderr, \
+             self.assertRaises(SystemExit) as exited:
+            sls_query.main()
+        self.assertEqual(exited.exception.code, 2)
+        self.assertIn("level 字段索引", stderr.getvalue())
+        self.assertNotIn("Traceback", stderr.getvalue())
+
+    def test_sls_level_query_uses_a_json_subfield_index(self):
+        queries = []
+        class Client:
+            timeout = None
+            def get_index_config(self, *_args):
+                return {"keys": {"content": {"type": "json", "json_keys": {"level": {"type": "text"}}}}}
+            def get_log_all(self, *_args, **kwargs):
+                queries.append(kwargs["query"])
+                return iter(())
+        with patch.object(paas, "load_config", return_value={"sls": {"project": "project", "region": "region"}}), \
+             patch.object(sls_query, "get_credentials", return_value=("ak", "sk")), \
+             patch.object(sls_query, "require_sdk", return_value=lambda *_args: Client()), \
+             patch.object(sys, "argv", ["sls_query.py", "--service", "orders", "--level", "ERROR"]), \
+             redirect_stdout(io.StringIO()):
+            sls_query.main()
+        self.assertEqual(queries, ["content.level: ERROR"])
+
+    def test_sls_jsonl_keeps_authoritative_timestamp_when_content_has_time_key(self):
+        content = '{"_time_":42,"level":"ERROR","message":"boom"}'
+        class Log:
+            def get_contents(self):
+                return {"content": content}
+            def get_time(self):
+                return 100
+        class Client:
+            timeout = None
+            def get_index_config(self, *_args):
+                return {"keys": {}}
+            def get_log_all(self, *_args, **_kwargs):
+                page = type("Page", (), {"get_logs": lambda self: [Log()],
+                                          "is_completed": lambda self: True})()
+                return iter([page])
+        config = {"sls": {"project": "project", "region": "region"}}
+        with patch.object(paas, "load_config", return_value=config), \
+             patch.object(sls_query, "get_credentials", return_value=("ak", "sk")), \
+             patch.object(sls_query, "require_sdk", return_value=lambda *_args: Client()), \
+             patch.object(sys, "argv", ["sls_query.py", "--service", "orders", "--jsonl"]), \
+             redirect_stdout(io.StringIO()) as output:
+            sls_query.main()
+        event = json.loads(output.getvalue())
+        self.assertEqual(event["_time_"], 100)
+        self.assertEqual(event["message"], "boom")
+
+    def test_parsed_json_content_does_not_leak_sensitive_fields_when_redacted(self):
+        flat = sls_query.flatten_contents({"content": '{"password":"hunter2","message":"boom"}'})
+        redacted = paas.redact_log_fields(flat)
+        self.assertNotIn("hunter2", json.dumps(redacted))
 
     def test_sls_query_rejects_invalid_time(self):
         with self.assertRaises(ValueError):
@@ -1268,6 +1602,7 @@ class LocalSlsQueryTests(unittest.TestCase):
         self.assertTrue(parser.parse_args(["--raw"]).jsonl)
         self.assertTrue(parser.parse_args(["--jsonl"]).jsonl)
         self.assertTrue(parser.parse_args(["--analysis"]).jsonl)
+        self.assertTrue(parser.parse_args(["--redact"]).redact)
 
     def test_custom_profile_names_use_one_shared_validation_rule(self):
         self.assertEqual(paas.validate_profile_name("custom-profile"), "custom-profile")
@@ -1339,24 +1674,53 @@ class SlsTests(unittest.TestCase):
             def get_logs(self):
                 return [object()]
 
+            def is_completed(self):
+                return True
+
         calls = []
         client = types.SimpleNamespace(
             get_logstore=lambda *_args: None,
             get_index_config=lambda *_args: {"keys": {"traceId": {}}},
-            get_logs=lambda *args, **kwargs: calls.append((args, kwargs)) or Response(),
+            get_log=lambda *args, **kwargs: calls.append((args, kwargs)) or Response(),
         )
         result = sls_query.doctor_result(client, "project", "logstore", now=1000, monotonic=lambda: 1.25)
         self.assertEqual(result["status"], "ok")
         self.assertEqual(result["indexed_fields"], ["traceId"])
         self.assertEqual(result["read_probe"], {"line_limit": 1, "matched_rows": 1, "duration_ms": 0})
         self.assertEqual(calls, [(("project", "logstore", 700, 1000),
-                                  {"query": "*", "line": 1, "offset": 0, "reverse": True})])
+                                  {"query": "*", "size": 1, "offset": 0, "reverse": True})])
+
+    def test_sls_doctor_rejects_an_incomplete_read_probe(self):
+        response = type("Response", (), {"get_logs": lambda self: [],
+                                         "is_completed": lambda self: False})()
+        client = types.SimpleNamespace(
+            get_logstore=lambda *_args: None,
+            get_index_config=lambda *_args: {"keys": {}},
+            get_log=lambda *_args, **_kwargs: response,
+        )
+        with self.assertRaisesRegex(RuntimeError, "不完整"):
+            sls_query.doctor_result(client, "project", "orders", now=1000, monotonic=lambda: 1.25)
+
+    def test_sls_doctor_uses_the_sdk_get_log_signature(self):
+        response = type("Response", (), {"get_logs": lambda self: [],
+                                         "is_completed": lambda self: True})()
+        calls = []
+        client = types.SimpleNamespace(
+            get_logstore=lambda *_args: None,
+            get_index_config=lambda *_args: {"keys": {}},
+            get_log=lambda *args, **kwargs: calls.append((args, kwargs)) or response,
+            get_logs=lambda *_args, **_kwargs: response,
+        )
+        result = sls_query.doctor_result(client, "project", "orders", now=1000, monotonic=lambda: 1.25)
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(calls, [(("project", "orders", 700, 1000),
+                                  {"query": "*", "size": 1, "offset": 0, "reverse": True})])
 
     def test_sls_doctor_stops_when_its_total_deadline_expires(self):
         client = type("Client", (), {
             "get_logstore": lambda *_args: None,
             "get_index_config": lambda *_args: {"keys": {}},
-            "get_logs": lambda *_args, **_kwargs: None,
+            "get_log": lambda *_args, **_kwargs: None,
         })()
         clock = iter((0, 0, sls_query.SLS_QUERY_DEADLINE_SECONDS + 1))
         with self.assertRaises(TimeoutError):
@@ -1376,6 +1740,12 @@ class SlsTests(unittest.TestCase):
             "--from", "6h", "--to", "now", "--limit", "100", "--raw", "--profile", "regional",
         ])
 
+    def test_trace_fetch_forwards_explicit_redaction(self):
+        command = sls_log_fetcher.build_sls_query_command(
+            Path("/tools/sls_query.py"), "trace-1", "wms", None, "regional", "15m", "now", 100, redact=True,
+        )
+        self.assertEqual(command[-1], "--redact")
+
     def test_trace_fetch_normalizes_sls_log_raw_event(self):
         event = sls_log_fetcher.normalize_event({
             "_time_": 0, "level": "ERROR", "message": "boom", "traceId": "trace-1",
@@ -1385,11 +1755,11 @@ class SlsTests(unittest.TestCase):
         self.assertEqual(event["message"], "boom")
         self.assertEqual(event["traceId"], "trace-1")
 
-    def test_trace_fetch_redacts_and_drops_unneeded_sensitive_fields(self):
+    def test_trace_fetch_preserves_log_content_by_default(self):
         event = sls_log_fetcher.normalize_event({
             "_time_": 0, "message": "token=top-secret", "password": "hunter2", "traceId": "trace-1",
         })
-        self.assertNotIn("top-secret", event["message"])
+        self.assertEqual(event["message"], "token=top-secret")
         self.assertNotIn("password", event)
         self.assertEqual(event["traceId"], "trace-1")
 
@@ -1494,14 +1864,14 @@ class SlsTests(unittest.TestCase):
         }}}, entity_patterns={"invoice_ids": r"invoice=(INV-\d+)"})
         self.assertEqual(result["entities"], {"invoice_ids": ["INV-42"]})
 
-    def test_analyzer_redacts_sensitive_message_content(self):
+    def test_analyzer_preserves_sensitive_message_content_by_default(self):
         result = log_analyzer.analyze({"services": {"wms": {
             "status": "ok", "error_logs": [{"level": "ERROR", "message": "token=top-secret"}],
             "warn_logs": [], "context_logs": [],
         }}})
-        self.assertNotIn("top-secret", json.dumps(result))
+        self.assertIn("top-secret", json.dumps(result))
 
-    def test_analyzer_applies_private_redaction_patterns_to_its_summary(self):
+    def test_analyzer_redacts_only_when_patterns_are_explicitly_supplied(self):
         result = log_analyzer.analyze({"services": {"wms": {
             "status": "ok", "error_logs": [{"level": "ERROR", "message": "customer=C-42"}],
             "warn_logs": [], "context_logs": [],
@@ -1515,6 +1885,11 @@ class SlsTests(unittest.TestCase):
     def test_analyzer_rejects_malformed_collector_data(self):
         with self.assertRaises(ValueError):
             log_analyzer.analyze({"services": []})
+
+    def test_analyzer_rejects_unknown_or_missing_service_status(self):
+        for item in ({"status": "pending"}, {}):
+            with self.subTest(item=item), self.assertRaisesRegex(ValueError, "status"):
+                log_analyzer.analyze({"services": {"wms": item}})
 
     def test_analyzer_cli_works_without_private_config(self):
         with tempfile.TemporaryDirectory() as directory:

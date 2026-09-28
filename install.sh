@@ -35,4 +35,5 @@ if [[ ! -f "$CONFIG_FILE" ]]; then
   exit 1
 fi
 
-echo "依赖和本地配置已就绪（$CAPABILITY）。凭据请存入 Keychain 或在单次命令中设置 PAAS_COOKIE。"
+python3 "$SKILL_DIR/scripts/setup.py" --check --capability "$CAPABILITY"
+echo "依赖、配置和凭据已就绪（${CAPABILITY}）。"

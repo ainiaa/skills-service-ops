@@ -2,6 +2,7 @@
 
 ## 未发布
 
+- 修复旧式扁平配置在非默认 profile 下混用路由与凭据、工单预检未绑定 PaaS 环境映射，以及生产数据库验证未按 SQL LIMIT 限制 PaaS 返回行数的问题。
 - 修复 SLS、PaaS、测试库和默认 profile 会从环境变量读取的问题；全部配置和凭据改为 macOS Keychain 优先、私有配置文件兜底。
 - 完善 README 的初始化、场景化命令、profile 与常见问题使用说明。
 - 修复 CI 仅验证 macOS 且第三方 Actions 使用可变版本标签的问题（Unix 环境或依赖动作版本变动时）。
