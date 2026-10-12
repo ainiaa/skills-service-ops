@@ -937,7 +937,8 @@ class DatabaseRoutingTests(unittest.TestCase):
         )
 
     def test_keychain_timeout_is_bounded_and_falls_back_to_private_config(self):
-        with patch.object(paas.subprocess, "run", side_effect=subprocess.TimeoutExpired("security", 10)) as run, \
+        with patch.object(paas.platform, "system", return_value="Darwin"), \
+             patch.object(paas.subprocess, "run", side_effect=subprocess.TimeoutExpired("security", 10)) as run, \
              patch.dict(os.environ, {"PAAS_COOKIE": "environment-cookie"}, clear=False):
             self.assertEqual(paas.get_cookie(config={"paas": {"cookie": "configured-cookie"}}), "configured-cookie")
         self.assertEqual(run.call_args.kwargs["timeout"], paas.KEYCHAIN_TIMEOUT_SECONDS)
