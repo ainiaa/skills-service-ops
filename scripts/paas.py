@@ -49,7 +49,7 @@ def set_active_profile(profile):
     _ACTIVE_PROFILE = validate_profile_name(profile) if profile else "default"
 
 
-def load_config(profile=None):
+def _load_config_document():
     try:
         import yaml
     except ImportError as error:
@@ -65,6 +65,10 @@ def load_config(profile=None):
         raise ValueError("本地配置文件格式无效。") from error
     if not isinstance(config, dict):
         raise ValueError("本地配置文件必须是对象。")
+    return config
+
+
+def _profile_config(config, profile):
     if "profiles" not in config:
         name = validate_profile_name(profile or active_profile())
         if name != "default":
@@ -80,6 +84,48 @@ def load_config(profile=None):
     if name not in profiles or not isinstance(profiles[name], dict):
         raise ValueError("未配置 profile：{}。".format(name))
     return profiles[name]
+
+
+def load_config(profile=None):
+    return _profile_config(_load_config_document(), profile)
+
+
+def resolve_profile_for_service(service, profile=None):
+    if profile:
+        return validate_profile_name(profile)
+    if service is None:
+        return active_profile()
+    if not isinstance(service, str) or not service:
+        raise ValueError("service 必须是非空字符串。")
+    if not CONFIG_PATH.exists():
+        return "default"
+    config = _load_config_document()
+    mapping = config.get("service_profile_mapping", {})
+    if not isinstance(mapping, dict) or set(mapping) - {"exact", "prefixes", "fallback"}:
+        raise ValueError("service_profile_mapping 仅支持 exact、prefixes 和 fallback。")
+    exact = mapping.get("exact", {})
+    prefixes = mapping.get("prefixes", {})
+    fallback = mapping.get("fallback")
+    if not isinstance(exact, dict) or not isinstance(prefixes, dict):
+        raise ValueError("service_profile_mapping.exact 和 prefixes 必须是映射。")
+    if any(not isinstance(name, str) or not name for name in exact):
+        raise ValueError("service_profile_mapping.exact 的服务名不能为空。")
+    if any(not isinstance(prefix, str) or not prefix for prefix in prefixes):
+        raise ValueError("service_profile_mapping.prefixes 的前缀不能为空。")
+    if fallback is not None and not isinstance(fallback, str):
+        raise ValueError("service_profile_mapping.fallback 必须是 profile 名称。")
+    configured_profiles = [*exact.values(), *prefixes.values()]
+    if fallback is not None:
+        configured_profiles.append(fallback)
+    for configured_profile in configured_profiles:
+        _profile_config(config, validate_profile_name(configured_profile))
+    selected = exact.get(service)
+    if selected is None:
+        selected = next((prefixes[prefix] for prefix in sorted(prefixes, key=len, reverse=True)
+                         if service.startswith(prefix)), fallback or "default")
+    selected = validate_profile_name(selected)
+    _profile_config(config, selected)
+    return selected
 
 
 def _keychain_value(account, profile=None):

@@ -23,6 +23,8 @@ def contract_cases(contract):
     for case in cases:
         if not isinstance(case, dict) or not isinstance(case.get("id"), str) or not case["id"]:
             raise ValueError("每个评测用例必须包含非空 id。")
+        if "must_not" in case:
+            raise ValueError("must_not 字段含义不明确；请使用 must_not_route or must_not_output。")
         if case["id"] in seen:
             raise ValueError("评测契约包含重复 id：{}。".format(case["id"]))
         seen.add(case["id"])
@@ -38,10 +40,11 @@ def behavior_reasons(case, result):
     if not set(values(case.get("must_ask"), "must_ask")).issubset(actual_asked):
         reasons.append("ask")
     output = "\n".join(values(result.get("actual_output"), "actual_output"))
-    observed = [*actual_route, *actual_asked]
-    if any(any(value in item for item in observed) or value in output
-           for value in values(case.get("must_not"), "must_not")):
-        reasons.append("must_not")
+    if any(any(value in item for item in actual_route)
+           for value in values(case.get("must_not_route"), "must_not_route")):
+        reasons.append("must_not_route")
+    if any(value in output for value in values(case.get("must_not_output"), "must_not_output")):
+        reasons.append("must_not_output")
     if not all(value in output for value in values(case.get("required_output"), "required_output")):
         reasons.append("output")
     return reasons

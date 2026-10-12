@@ -26,7 +26,7 @@ python3 scripts/setup.py --check --capability sls
 ### 查询日志
 
 ```bash
-python3 scripts/sls_query.py --doctor --service orders --profile default
+python3 scripts/sls_query.py --doctor --service orders
 python3 scripts/sls_query.py --service orders --from 15m --limit 100
 python3 scripts/sls_query.py --service orders --level ERROR --from 15m --limit 100
 python3 scripts/sls_query.py --dry-run --service orders --query 'TraceId: abc-123' --from 1h
@@ -34,11 +34,13 @@ python3 scripts/sls_query.py --dry-run --service orders --query 'TraceId: abc-12
 
 不指定 `--level` 时查询所有级别；`--level ERROR` 仅在存在 `level`（或 `content.level`）字段索引时精确筛选 ERROR，无索引会拒绝执行，不会退化为全文搜索。可用 `--doctor` 检查索引；若确实需要全文搜索，显式使用 `--query ERROR`。dry-run 不读取远端索引，带 `--level` 或 `--trace` 的计划会标记索引未验证，`query` 为 `null`、`requested_filters` 保留输入条件，不能当作最终查询语句。默认时间范围是 15 分钟、最新日志优先；需按时间从早到晚查看时传 `--forward`。真实查询超过一小时必须先 dry-run，再附加 `--allow-wide-range`。需要 JSONL 时使用 `--jsonl`，单次最多 1000 行；仅在需要脱敏时附加 `--redact`。
 
+以上是直接使用脚本时的默认值。Skill 查询会显式使用最近 1 天；只有缺省 1 天范围查询成功、未截断且没有命中时，才会保留条件先 dry-run 再扩大到 30 天查询一次。用户指定的时间范围、超时、权限错误和截断结果都不会自动扩窗。遇到 SDK 签名或超时错误时，先运行 `--doctor` 并核对当前环境与 `requirements.lock`，不要绕过脚本直接拼 SDK 请求。
+
 ### TraceId 排障
 
 ```bash
 tmp_dir="$(mktemp -d)" && chmod 700 "$tmp_dir"
-python3 scripts/sls_log_fetcher.py --trace-id abc-123 --service orders --profile default --from 15m > "$tmp_dir/logs.json"
+python3 scripts/sls_log_fetcher.py --trace-id abc-123 --service orders --from 15m > "$tmp_dir/logs.json"
 python3 scripts/log_analyzer.py < "$tmp_dir/logs.json" > "$tmp_dir/analysis.json"
 ```
 
@@ -79,7 +81,7 @@ python3 scripts/db_apply.py --env prod --service orders \
 
 ### 使用 profile
 
-默认使用 `default`。其他部署显式使用 `--profile regional`；profile 只能由字母、数字、`-`、`_` 构成并以字母开头。服务、SLS 路由、PaaS 契约及其凭据均来自 Keychain 或私有配置文件，不读取环境变量。
+未指定 `--profile` 时，按私有配置中的可选 `service_profile_mapping` 选择 profile；`exact` 优先，其次匹配最长 `prefixes`，再用可选 `fallback`，均未命中时用 `default`。省略该映射即维持 `default`。映射对 SLS、DB/PaaS 按服务执行；TraceId 关联采集会为每个服务分别解析。显式 `--profile` 优先于映射；SLS 的 `--env` 兼容别名也按显式 profile 处理。profile 只能由字母、数字、`-`、`_` 构成并以字母开头；映射目标必须对应已配置的 `profiles.<name>`。示例见配置模板。数据库 `--env prod|test` 仍单独决定目标环境，不受 profile 映射影响。服务、SLS 路由、PaaS 契约及其凭据均来自 Keychain 或私有配置文件，不读取环境变量。
 旧式不含 `profiles` 的扁平配置仅支持 `default`；使用其他 profile 时须在私有配置中建立对应的 `profiles.<name>`，以免路由与凭据混用。
 
 ## 常见问题
@@ -87,6 +89,8 @@ python3 scripts/db_apply.py --env prod --service orders \
 **依赖或配置失败？** 运行 `python3 scripts/setup.py --check --capability <能力>`，按错误补齐私有配置或 Keychain。
 
 **SLS 超时、权限失败或结果截断？** 先运行 `--doctor`，缩小范围；截断数据只能视为不完整证据。
+
+**SLS SDK 报 `TypeError` 或签名不匹配？** 核对安装依赖是否符合 `requirements.lock`，再用 `--doctor` 检查连接和索引；兼容问题解决前将其报告为采集失败，不把失败解释为无日志。
 
 **PaaS 返回结构无效？** 当前只支持上述固定响应包络；核对私有契约，勿将内部字段写入仓库。
 

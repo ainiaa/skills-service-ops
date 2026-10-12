@@ -119,6 +119,109 @@ class ReadOnlyQueryTests(unittest.TestCase):
         self.assertTrue(db_export.is_export_query(sql))
 
 
+class ServiceProfileMappingTests(unittest.TestCase):
+    def write_config(self, directory, content):
+        config_path = Path(directory) / "config.yaml"
+        config_path.write_text(content, encoding="utf-8")
+        config_path.chmod(0o600)
+        return config_path
+
+    def test_service_profile_mapping_prefers_exact_then_longest_prefix_then_fallback(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = self.write_config(directory, """profiles:
+  default: {}
+  ht: {}
+  regional: {}
+service_profile_mapping:
+  exact:
+    ddi-orders: regional
+  prefixes:
+    ddi: default
+    ddi-: ht
+  fallback: ht
+""")
+            with patch.object(paas, "CONFIG_PATH", config_path):
+                self.assertEqual(paas.resolve_profile_for_service("ddi-orders"), "regional")
+                self.assertEqual(paas.resolve_profile_for_service("ddi-pay"), "ht")
+                self.assertEqual(paas.resolve_profile_for_service("bsi-pay"), "ht")
+
+    def test_service_profile_mapping_defaults_without_mapping_and_explicit_profile_wins(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = self.write_config(directory, "profiles:\n  default: {}\n  ht: {}\n")
+            with patch.object(paas, "CONFIG_PATH", config_path):
+                self.assertEqual(paas.resolve_profile_for_service("orders"), "default")
+                self.assertEqual(paas.resolve_profile_for_service("orders", "ht"), "ht")
+
+    def test_service_profile_mapping_rejects_invalid_profile_targets(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = self.write_config(directory, """profiles:
+  default: {}
+service_profile_mapping:
+  prefixes:
+    ddi: missing
+""")
+            with patch.object(paas, "CONFIG_PATH", config_path), \
+                 self.assertRaisesRegex(ValueError, "未配置 profile：missing"):
+                paas.resolve_profile_for_service("ddi-orders")
+
+    def test_service_profile_mapping_rejects_malformed_mapping(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = self.write_config(directory, """profiles:
+  default: {}
+service_profile_mapping:
+  prefixes: []
+""")
+            with patch.object(paas, "CONFIG_PATH", config_path), \
+                 self.assertRaisesRegex(ValueError, "prefixes"):
+                paas.resolve_profile_for_service("ddi-orders")
+
+    def test_database_query_selects_profile_from_service_before_loading_config(self):
+        config = {"services": {"ddi-orders": {"prod_db_group": "orders"}}}
+        with patch.object(paas, "resolve_profile_for_service", return_value="regional") as resolve_profile, \
+             patch.object(paas, "set_active_profile") as set_profile, \
+             patch.object(paas, "load_config", return_value=config), \
+             patch.object(db_query, "query_prod", return_value={"columns": [], "rows": []}), \
+             patch.object(sys, "argv", ["db_query.py", "--env", "prod", "--service", "ddi-orders",
+                                         "--purpose", "incident check", "--sql", "SELECT id FROM orders LIMIT 1"]), \
+             redirect_stdout(io.StringIO()):
+            db_query.main()
+        resolve_profile.assert_called_once_with("ddi-orders", None)
+        set_profile.assert_called_once_with("regional")
+
+    def test_database_apply_preflight_binds_the_mapped_profile_and_separate_target_env(self):
+        config = {"services": {"ddi-orders": {"prod_db_group": "orders-db"}}, "paas": {
+            "apply_envs": {"test": "testing"}, "apply_api_base": "https://example.invalid",
+            "apply_endpoints": {"ddl": "ddl", "dml": "dml"}, "apply_response_id_field": "id",
+            "apply_contract": {"service_name": "service-ops", "fields": {
+                "sql": "sql", "service": "service", "group": "group", "reason": "reason",
+                "envs": "envs",
+            }},
+        }}
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = self.write_config(directory, """profiles:
+  default: {}
+  regional: {}
+service_profile_mapping:
+  prefixes:
+    ddi: regional
+""")
+            previous_profile = paas.active_profile()
+            try:
+                with patch.object(paas, "CONFIG_PATH", config_path), \
+                     patch.object(paas, "load_config", return_value=config), \
+                     patch.object(sys, "argv", ["db_apply.py", "--env", "test", "--service", "ddi-orders",
+                                                 "--reason", "repair", "--sql",
+                                                 "UPDATE orders SET status = 1 WHERE id = 1;"]), \
+                     redirect_stdout(io.StringIO()) as output:
+                    db_apply.main()
+                    token = json.loads(output.getvalue())["confirmation_token"]
+                    request = db_apply.load_preflight(token)["request"]
+            finally:
+                paas.set_active_profile(previous_profile)
+        self.assertEqual(request["profile"], "regional")
+        self.assertEqual(request["env"], "test")
+
+
 class ExportTests(unittest.TestCase):
     def test_prod_query_reports_paas_error_as_failure(self):
         config = {"services": {"orders": {"prod_db_group": "orders-db"}}}
@@ -1247,6 +1350,46 @@ class SetupTests(unittest.TestCase):
 
 
 class EvalContractTests(unittest.TestCase):
+    def test_skill_behavior_evaluations_cover_operational_defaults_and_side_effect_boundaries(self):
+        root = Path(__file__).parent.parent
+        with (root / "evals" / "skill-behavior.json").open(encoding="utf-8") as file:
+            behavior = json.load(file)
+        cases = {case["id"]: case for case in behavior["cases"]}
+
+        self.assertIn("default-log-window", cases)
+        self.assertNotIn("--profile default", cases["default-log-window"]["required_output"])
+        self.assertIn("--profile default", cases["default-log-window"]["must_not_output"])
+        self.assertIn("--from 1d", cases["default-log-window"]["required_output"])
+        self.assertIn("service-profile-mapping", cases)
+        self.assertIn("profile default", cases["service-profile-mapping"]["required_output"])
+
+        self.assertIn("today-means-calendar-day", cases)
+        self.assertIn("Asia/Kuala_Lumpur", cases["today-means-calendar-day"]["required_output"])
+        self.assertIn("--from 1d", cases["today-means-calendar-day"]["must_not_route"])
+
+        self.assertIn("default-window-no-results-expands-once", cases)
+        self.assertEqual(cases["default-window-no-results-expands-once"]["expected_route"], [
+            "sls_query.py --dry-run --from 30d",
+            "sls_query.py --from 30d --allow-wide-range",
+        ])
+
+        self.assertIn("failed-query-does-not-expand", cases)
+        self.assertIn("--from 30d", cases["failed-query-does-not-expand"]["must_not_route"])
+
+        self.assertIn("default-profile-needs-db-target", cases)
+        self.assertIn("prod or test", cases["default-profile-needs-db-target"]["must_ask"])
+
+        self.assertIn("xxl-existing-run-is-read-only", cases)
+        self.assertIn("唯一映射到 orders", cases["xxl-existing-run-is-read-only"]["input"])
+        self.assertIn("run_xxl_job.py", cases["xxl-existing-run-is-read-only"]["must_not_route"])
+        self.assertIn("logId 单独不足以读取旧日志", cases["xxl-existing-run-is-read-only"]["required_output"])
+
+        self.assertIn("xxl-explicit-trigger", cases)
+        self.assertEqual(cases["xxl-explicit-trigger"]["expected_route"], ["xxl-job-executor"])
+
+        self.assertIn("xxl-params-come-from-handler", cases)
+        self.assertIn("inspect Handler and DTO", cases["xxl-params-come-from-handler"]["expected_route"])
+
     def test_evaluation_rejects_non_object_result_lines(self):
         contract = {"cases": [{"id": "log-search", "expected_action": "activate",
                                 "expected_route": "sls_query.py"}]}
@@ -1264,24 +1407,60 @@ class EvalContractTests(unittest.TestCase):
     def test_behavior_evaluation_contract_checks_route_questions_and_output(self):
         contract = {"cases": [{
             "id": "ambiguous", "expected_route": [], "must_ask": ["service", "sql"],
-            "must_not": ["db_apply.py"], "required_output": ["下一步"],
+            "must_not_output": ["db_apply.py"], "required_output": ["下一步"],
         }]}
         result = eval_contract.evaluate(contract, [{
             "id": "ambiguous", "actual_route": [], "actual_asked": ["service"],
             "actual_output": ["下一步", "使用 db_apply.py"],
         }])
         self.assertEqual(result["status"], "failed")
-        self.assertEqual(result["failed"], [{"id": "ambiguous", "reasons": ["ask", "must_not"]}])
+        self.assertEqual(result["failed"], [{"id": "ambiguous", "reasons": ["ask", "must_not_output"]}])
+
+    def test_behavior_evaluation_distinguishes_forbidden_route_from_forbidden_output(self):
+        contract = {"cases": [{
+            "id": "read-only-history", "expected_route": ["sls_query.py"],
+            "must_not_route": ["run_xxl_job.py"],
+            "must_not_output": ["完整导出数据"],
+        }]}
+        result = eval_contract.evaluate(contract, [{
+            "id": "read-only-history", "actual_route": ["sls_query.py"], "actual_asked": [],
+            "actual_output": ["我不会调用 run_xxl_job.py；只展示必要日志摘要。"],
+        }])
+        self.assertEqual(result["status"], "passed")
+
+        result = eval_contract.evaluate(contract, [{
+            "id": "read-only-history", "actual_route": ["sls_query.py"], "actual_asked": [],
+            "actual_output": ["完整导出数据"],
+        }])
+        self.assertEqual(result["failed"], [{"id": "read-only-history", "reasons": ["must_not_output"]}])
+
+        result = eval_contract.evaluate(contract, [{
+            "id": "read-only-history", "actual_route": ["run_xxl_job.py"], "actual_asked": [],
+            "actual_output": ["不会重新触发。"],
+        }])
+        self.assertEqual(result["failed"], [{"id": "read-only-history", "reasons": ["route", "must_not_route"]}])
+
+        result = eval_contract.evaluate(contract, [{
+            "id": "read-only-history", "actual_route": ["sls_query.py"], "actual_asked": [],
+            "actual_output": ["不会重新触发。"],
+        }])
+        self.assertEqual(result["status"], "passed")
 
     def test_behavior_evaluation_contract_rejects_forbidden_route_substrings(self):
         contract = {"cases": [{
-            "id": "ticket", "expected_route": ["db_apply.py preflight"], "must_not": ["db_apply.py"],
+            "id": "ticket", "expected_route": ["db_apply.py preflight"],
+            "must_not_route": ["db_apply.py"],
         }]}
         result = eval_contract.evaluate(contract, [{
             "id": "ticket", "actual_route": ["db_apply.py preflight"], "actual_asked": [], "actual_output": [],
         }])
         self.assertEqual(result["status"], "failed")
-        self.assertEqual(result["failed"], [{"id": "ticket", "reasons": ["must_not"]}])
+        self.assertEqual(result["failed"], [{"id": "ticket", "reasons": ["must_not_route"]}])
+
+    def test_behavior_evaluation_rejects_ambiguous_must_not_field(self):
+        contract = {"cases": [{"id": "ambiguous", "must_not": ["command"]}]}
+        with self.assertRaisesRegex(ValueError, "must_not_route or must_not_output"):
+            eval_contract.evaluate(contract, [])
 
     def test_trigger_evaluation_contract_accepts_matching_results(self):
         contract = {"cases": [{"id": "log-search", "expected_action": "activate",
@@ -1331,6 +1510,25 @@ class EvalContractTests(unittest.TestCase):
 
 
 class LocalSlsQueryTests(unittest.TestCase):
+    def test_sls_dry_run_uses_service_profile_mapping(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "config.yaml"
+            config_path.write_text("""profiles:
+  default: {}
+  regional: {}
+service_profile_mapping:
+  exact:
+    orders: regional
+""", encoding="utf-8")
+            config_path.chmod(0o600)
+            with patch.object(paas, "CONFIG_PATH", config_path), \
+                 patch.object(sls_query, "get_credentials", side_effect=AssertionError("dry-run 不访问凭据")), \
+                 patch.object(sls_query, "require_sdk", side_effect=AssertionError("dry-run 不访问 SLS")), \
+                 patch.object(sys, "argv", ["sls_query.py", "--dry-run", "--service", "orders"]), \
+                 redirect_stdout(io.StringIO()) as output:
+                sls_query.main()
+        self.assertEqual(json.loads(output.getvalue())["profile"], "regional")
+
     def test_sls_dry_run_never_loads_configuration_or_credentials(self):
         with patch.object(paas, "load_config", side_effect=AssertionError("不能读取配置")) as load_config, \
              patch.object(sls_query, "get_credentials", side_effect=AssertionError("不能读取凭据")) as get_credentials, \
@@ -1648,6 +1846,25 @@ class CustomProfileTests(unittest.TestCase):
 
 
 class SlsTests(unittest.TestCase):
+    def test_trace_fetch_selects_a_profile_for_each_service(self):
+        profiles = {"orders": "default", "payments": "regional"}
+        with patch.object(sls_log_fetcher.sls_query, "resolve_profile",
+                          side_effect=lambda env, profile, service: profiles[service]) as resolve_profile, \
+             patch.object(sls_log_fetcher, "local_sls_query_script", return_value=Path("/tools/sls_query.py")), \
+             patch.object(sls_log_fetcher, "fetch_service", side_effect=lambda _command: {"status": "ok"}) as fetch_service, \
+             patch.object(sys, "argv", ["sls_log_fetcher.py", "--trace-id", "trace-1", "--service", "orders",
+                                         "--related-services", "payments"]), \
+             redirect_stdout(io.StringIO()) as output:
+            sls_log_fetcher.main()
+        self.assertEqual([call.args[2] for call in resolve_profile.call_args_list], ["orders", "orders", "payments"])
+        commands = [call.args[0] for call in fetch_service.call_args_list]
+        self.assertIn(["--profile", "default"], [commands[0][index:index + 2]
+                                                    for index in range(len(commands[0]) - 1)])
+        self.assertIn(["--profile", "regional"], [commands[1][index:index + 2]
+                                                      for index in range(len(commands[1]) - 1)])
+        self.assertEqual({service: item["profile"] for service, item in
+                          json.loads(output.getvalue())["services"].items()}, profiles)
+
     def test_trace_fetch_defaults_to_a_narrow_time_window(self):
         with patch.object(sls_log_fetcher.sls_query, "resolve_profile", return_value="regional"), \
              patch.object(sls_log_fetcher, "local_sls_query_script", return_value=Path("/tools/sls_query.py")), \
@@ -1931,6 +2148,42 @@ class SlsTests(unittest.TestCase):
                 log_analyzer.main([])
         self.assertEqual(json.loads(output.getvalue())["summary"]["error_count"], 0)
         load_config.assert_called_once_with("regional")
+
+    def test_analyzer_cli_applies_each_service_profile_rules(self):
+        profiles = {
+            "default": {"log_analysis": {
+                "entity_patterns": {"orders": r"order=(O-\d+)"},
+                "redaction_patterns": [r"alpha=[A-Z]+"],
+            }},
+            "regional": {"log_analysis": {
+                "entity_patterns": {"invoices": r"invoice=(I-\d+)"},
+                "redaction_patterns": [r"beta=[A-Z]+"],
+            }},
+        }
+        data = {"profile": "default", "services": {
+            "orders": {"profile": "default", "status": "ok", "error_logs": [], "warn_logs": [],
+                       "context_logs": [{"level": "ERROR", "time": "1",
+                                         "message": "order=O-1 alpha=ABC beta=XYZ"}]},
+            "ddi-invoices": {"profile": "regional", "status": "ok", "error_logs": [], "warn_logs": [],
+                             "context_logs": [{"level": "ERROR", "time": "2",
+                                               "message": "invoice=I-2 alpha=ABC beta=XYZ"}]},
+        }}
+        output = io.StringIO()
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "config.yaml"
+            config_path.touch()
+            with patch.object(log_analyzer.paas, "CONFIG_PATH", config_path), \
+                 patch.object(log_analyzer.paas, "load_config", side_effect=lambda profile: profiles[profile]) as load_config, \
+                 patch.object(sys, "stdin", io.StringIO(json.dumps(data))), \
+                 redirect_stdout(output):
+                log_analyzer.main(["--redact"])
+        result = json.loads(output.getvalue())
+        self.assertEqual(result["entities"], {"orders": ["O-1"], "invoices": ["I-2"]})
+        self.assertEqual([call.args[0] for call in load_config.call_args_list], ["default", "regional"])
+        self.assertNotIn("alpha=ABC", result["timeline"][0]["message"])
+        self.assertIn("alpha=ABC", result["timeline"][1]["message"])
+        self.assertIn("beta=XYZ", result["timeline"][0]["message"])
+        self.assertNotIn("beta=XYZ", result["timeline"][1]["message"])
 
 
 if __name__ == "__main__":

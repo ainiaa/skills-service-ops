@@ -317,8 +317,8 @@ def main():
     parser.add_argument("--profile")
     args = parser.parse_args()
     try:
-        paas.set_active_profile(args.profile)
-    except ValueError as error:
+        paas.set_active_profile(paas.resolve_profile_for_service(args.service, args.profile))
+    except (ImportError, OSError, ValueError) as error:
         parser.error(str(error))
     if args.batch_size < 1:
         parser.error("--batch-size 必须大于 0。")

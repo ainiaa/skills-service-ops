@@ -16,6 +16,8 @@ python3 <skill-dir>/scripts/eval_contract.py --results <runner-results.jsonl>
 
 行为场景使用 `actual_route`、`actual_asked` 和 `actual_output`（均为字符串或字符串列表）；例如 `actual_asked` 记录实际追问字段，`actual_output` 记录最终输出中的标志词。执行时指定契约：
 
+`must_not_route` 只检查实际路由，适用于禁止调用某命令；`must_not_output` 只检查最终输出，适用于禁止输出某个文本。旧字段 `must_not` 含义不明确，判定器会拒绝该契约，要求改用其中一个明确字段。
+
 ```bash
 python3 <skill-dir>/scripts/eval_contract.py \
   --cases <skill-dir>/evals/skill-behavior.json --results <runner-results.jsonl>

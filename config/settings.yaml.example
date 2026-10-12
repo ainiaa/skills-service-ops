@@ -27,3 +27,10 @@ profiles:
     sls: {project: "", region: "", endpoint: "", access_key: "", access_secret: ""}
     log_analysis: {related_service_pattern: "", entity_patterns: {}, redaction_patterns: []}
     services: {}
+# 可选：自动按服务名选择 profile；exact 优先，其次匹配最长前缀，再用 fallback。
+# 每个目标 profile 都必须在 profiles 下配置。前缀匹配区分大小写。
+# service_profile_mapping:
+#   exact: {ddi-special: regional}
+#   prefixes: {ddi: default, bsi: default}
+#   fallback: ht
+# 启用 fallback: ht 前，请先新增 profiles.ht。

@@ -40,13 +40,18 @@ def missing_dependencies(capability="all"):
 
 
 def check_readiness(capability="all", profile=None, service=None):
+    missing = missing_dependencies(capability)
+    errors = ["缺少 Python 依赖：{}".format(", ".join(missing))] if missing else []
+    try:
+        if "pyyaml" not in missing:
+            profile = paas.resolve_profile_for_service(service, profile)
+    except (ImportError, OSError, ValueError) as error:
+        return errors + [str(error)]
     if profile is not None:
         try:
             paas.validate_profile_name(profile)
         except ValueError as error:
             return [str(error)]
-    missing = missing_dependencies(capability)
-    errors = ["缺少 Python 依赖：{}".format(", ".join(missing))] if missing else []
     config = None
     if "pyyaml" not in missing:
         try:

@@ -66,10 +66,10 @@ def parse_time(value, now):
     raise ValueError("无效时间：{}；使用 epoch、now 或 1d/6h/30m。".format(value))
 
 
-def resolve_profile(environment, profile):
+def resolve_profile(environment, profile, service=None):
     if environment and profile:
         raise ValueError("--env 与 --profile 不能同时使用。")
-    return environment or profile or paas.active_profile()
+    return paas.resolve_profile_for_service(service, environment or profile)
 
 
 def quote_full_text(value):
@@ -300,7 +300,7 @@ def build_parser():
     parser.add_argument("--analysis", dest="jsonl", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--redact", action="store_true", help="按配置规则脱敏日志输出")
     parser.add_argument("--doctor", action="store_true")
-    parser.add_argument("--dry-run", action="store_true", help="仅输出查询计划，不读取配置、凭据或 SLS")
+    parser.add_argument("--dry-run", action="store_true", help="仅输出查询计划；可解析私有配置以选择 profile，不访问 Keychain 或 SLS")
     return parser
 
 
@@ -312,14 +312,14 @@ def main():
     if args.doctor and (args.dry_run or args.terms or args.trace or args.level or args.query or args.jsonl):
         parser.error("--doctor 只能与路由参数一起使用。")
     try:
-        args.profile = resolve_profile(args.env, args.profile)
         build_query(args.query, args.trace, args.terms, args.level)
         now = time.time()
         from_ts, to_ts = parse_time(args.from_time, now), parse_time(args.to, now)
         if from_ts >= to_ts:
             raise ValueError("--from 必须早于 --to。")
         args.logstore = resolve_logstore(args.logstore)
-    except ValueError as error:
+        args.profile = resolve_profile(args.env, args.profile, args.logstore)
+    except (ImportError, OSError, ValueError) as error:
         parser.error(str(error))
     if args.dry_run:
         if args.level or args.trace:

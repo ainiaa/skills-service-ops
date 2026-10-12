@@ -97,15 +97,23 @@ def main():
     args = parser.parse_args()
     if args.limit < 1 or args.limit > sls_query.MAX_QUERY_LIMIT:
         parser.error("--limit 必须为 1 到 {} 的整数。".format(sls_query.MAX_QUERY_LIMIT))
-    profile = sls_query.resolve_profile(args.env, args.profile)
     script = local_sls_query_script()
     services = dict.fromkeys([args.service] + args.related_services)
+    try:
+        profile = sls_query.resolve_profile(args.env, args.profile, args.service)
+    except (ImportError, OSError, ValueError) as error:
+        parser.error(str(error))
     output = {"trace_id": args.trace_id, "profile": profile, "collector": "service-ops", "services": {}}
     for service in services:
-        command = build_sls_query_command(script, args.trace_id, service, args.env, args.profile,
+        try:
+            service_profile = sls_query.resolve_profile(args.env, args.profile, service)
+        except (ImportError, OSError, ValueError) as error:
+            parser.error(str(error))
+        command = build_sls_query_command(script, args.trace_id, service, None, service_profile,
                                           args.from_time, args.to, args.limit, args.allow_wide_range, args.redact)
         fetched = fetch_service(command)
         fetched["logstore"] = service
+        fetched["profile"] = service_profile
         output["services"][service] = fetched
     print(json.dumps(output, ensure_ascii=False))
 
