@@ -1,0 +1,36 @@
+# 运行 `python3 scripts/setup.py --init` 会将本模板复制到 ~/.service-ops/config.yaml；请只填写该权限为 600 的私有文件。全部配置与凭据均保存在此处；macOS Keychain 中同名凭据优先于此文件。
+profiles:
+  default:
+    paas:
+      cookie: ""
+      query_api_url: ""
+      query_envs: {prod: "", test: ""}
+      query_contract:
+        fields: {group: "", env: "", sql: "", limit: ""}
+      # 查询响应固定为 [{"columnList": ["id"], "rows": [[1]]}]；其他响应结构暂不支持。
+      cookie_prefix: ""
+      request_headers: {}
+      apply_api_base: ""
+      apply_endpoints: {ddl: "", dml: ""}
+      apply_response_id_field: ""
+      apply_envs: {prod: "", test: ""}
+      apply_contract:
+        service_name: ""
+        fields: {sql: "", service: "", group: "", reason: "", envs: "", start: "", end: ""}
+      task_api_base: ""
+      task_actions:
+        approve: {endpoint: "", id_field: "", message_field: ""}
+        execute: {endpoint: "", id_field: ""}
+        recall: {endpoint: "", id_field: ""}
+    # 测试库账号应仅有各服务 services.<service>.test_database 的最小权限。
+    test_db: {host: "", port: 3306, user: "", password: ""}
+    sls: {project: "", region: "", endpoint: "", access_key: "", access_secret: ""}
+    log_analysis: {related_service_pattern: "", entity_patterns: {}, redaction_patterns: []}
+    services: {}
+# 可选：自动按服务名选择 profile；exact 优先，其次匹配最长前缀，再用 fallback。
+# 每个目标 profile 都必须在 profiles 下配置。前缀匹配区分大小写。
+# service_profile_mapping:
+#   exact: {ddi-special: regional}
+#   prefixes: {ddi: default, bsi: default}
+#   fallback: ht
+# 启用 fallback: ht 前，请先新增 profiles.ht。

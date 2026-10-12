@@ -1,2 +1,97 @@
-# skills-service-ops
-skills-service-ops
+# service-ops
+
+面向已配置服务的受控运维 Skill：SLS 日志与 TraceId 排障、只读数据库验证、Excel 导出和 PaaS 变更工单。真实 SLS 查询支持 macOS/Unix 主线程；私有配置和凭据不得提交。
+
+## 快速开始
+
+```bash
+python3 -m pip install -r requirements.lock
+python3 scripts/setup.py --init
+# 填写 ~/.service-ops/config.yaml（包括 Keychain 未提供的凭据）
+python3 scripts/setup.py --check --capability sls
+```
+
+`requirements.lock` 是日常安装与 CI 的完整锁定集，已在 Python 3.14/macOS 隔离环境验证。按需检查 `sls`、`paas`、`db`、`export`、`apply` 或全部能力 `all`；`apply` 就绪检查包含提交及审批、执行、撤回工单的端点。
+
+## 配置与凭据
+
+`setup.py --init` 会从 [配置模板](config/settings.yaml.example) 创建权限为 `600` 的 `~/.service-ops/config.yaml`。填写 SLS 的 project/region/endpoint/AK/SK、服务的生产 group 与测试库、PaaS 契约和可选脱敏规则；SLS 日志默认原样输出，只有显式传 `--redact` 才使用这些规则。PaaS 查询成功响应固定为 `[{"columnList": [...], "rows": [...]}]`。
+
+全部配置与凭据均可填写在该私有文件中；macOS Keychain 的同 profile 凭据优先，配置文件作为兜底。当前不读取任何环境变量。
+
+## 常用场景
+
+示例中的服务、TraceId 和路径均为占位符，必须替换为用户明确提供、已配置的值。
+
+### 查询日志
+
+```bash
+python3 scripts/sls_query.py --doctor --service orders
+python3 scripts/sls_query.py --service orders --from 15m --limit 100
+python3 scripts/sls_query.py --service orders --level ERROR --from 15m --limit 100
+python3 scripts/sls_query.py --dry-run --service orders --query 'TraceId: abc-123' --from 1h
+```
+
+不指定 `--level` 时查询所有级别；`--level ERROR` 仅在存在 `level`（或 `content.level`）字段索引时精确筛选 ERROR，无索引会拒绝执行，不会退化为全文搜索。可用 `--doctor` 检查索引；若确实需要全文搜索，显式使用 `--query ERROR`。dry-run 不读取远端索引，带 `--level` 或 `--trace` 的计划会标记索引未验证，`query` 为 `null`、`requested_filters` 保留输入条件，不能当作最终查询语句。默认时间范围是 15 分钟、最新日志优先；需按时间从早到晚查看时传 `--forward`。真实查询超过一小时必须先 dry-run，再附加 `--allow-wide-range`。需要 JSONL 时使用 `--jsonl`，单次最多 1000 行；仅在需要脱敏时附加 `--redact`。
+
+以上是直接使用脚本时的默认值。Skill 查询会显式使用最近 1 天；只有缺省 1 天范围查询成功、未截断且没有命中时，才会保留条件先 dry-run 再扩大到 30 天查询一次。用户指定的时间范围、超时、权限错误和截断结果都不会自动扩窗。遇到 SDK 签名或超时错误时，先运行 `--doctor` 并核对当前环境与 `requirements.lock`，不要绕过脚本直接拼 SDK 请求。
+
+### TraceId 排障
+
+```bash
+tmp_dir="$(mktemp -d)" && chmod 700 "$tmp_dir"
+python3 scripts/sls_log_fetcher.py --trace-id abc-123 --service orders --from 15m > "$tmp_dir/logs.json"
+python3 scripts/log_analyzer.py < "$tmp_dir/logs.json" > "$tmp_dir/analysis.json"
+```
+
+`truncated_services` 非空代表证据不完整；采集失败不能解释为无日志。日志默认原样保留；仅在明确要求脱敏时，给采集器和分析器都附加 `--redact`。阅读后删除该临时目录。
+
+### 数据验证与 Excel 导出
+
+只接受明确服务、环境、用途和 SQL。验证查询必须是显式字段、无副作用的单条 `SELECT`，且 `LIMIT` 不超过 100；脚本只放行常用的已核准只读函数，其他函数调用会被拒绝。静态 SQL 检查不能替代数据库权限控制，测试库账号及生产 PaaS 查询端点仍须使用只读权限：
+
+```bash
+python3 scripts/db_query.py --env test --service orders \
+  --purpose '核对订单状态' --sql 'SELECT id, status FROM orders WHERE id = 42 LIMIT 1'
+```
+
+导出上限为 10000 行，目标必须是绝对 `.xlsx` 路径：
+
+```bash
+python3 scripts/db_export.py --env prod --service orders \
+  --purpose '用户已授权的订单核对' --sql-file /absolute/path/orders.sql \
+  --output /absolute/path/orders.xlsx
+```
+
+生产导出须在当前请求获得明确授权；已有文件仅在传入 `--overwrite` 后覆盖。
+
+### 工单预检与提交
+
+工单不会自动触发，只能在用户显式调用 `$skills-service-ops` 并明确要求该操作时执行。
+
+```bash
+python3 scripts/db_apply.py --env prod --service orders \
+  --reason '修复订单状态' --sql-file /absolute/path/change.sql
+python3 scripts/db_apply.py --env prod --service orders \
+  --reason '修复订单状态' --sql-file /absolute/path/change.sql \
+  --submit --confirm '<confirmation_token>'
+```
+
+先核对预检输出的 SQL、group、窗口、拆分后的语句顺序和 token；混合 DDL/DML 会保持输入语句顺序拆分提交，但提交顺序不保证平台实际执行顺序。若语句间存在依赖，应拆成多次操作，核实前一工单执行完成后再提交下一工单。`UPDATE`/`DELETE` 必须有顶层 `WHERE`，`DROP`/`TRUNCATE` 还需 `--allow-destructive`。token 一次性消费，失败时先核对工单，不能重放。
+
+### 使用 profile
+
+未指定 `--profile` 时，按私有配置中的可选 `service_profile_mapping` 选择 profile；`exact` 优先，其次匹配最长 `prefixes`，再用可选 `fallback`，均未命中时用 `default`。省略该映射即维持 `default`。映射对 SLS、DB/PaaS 按服务执行；TraceId 关联采集会为每个服务分别解析。显式 `--profile` 优先于映射；SLS 的 `--env` 兼容别名也按显式 profile 处理。profile 只能由字母、数字、`-`、`_` 构成并以字母开头；映射目标必须对应已配置的 `profiles.<name>`。示例见配置模板。数据库 `--env prod|test` 仍单独决定目标环境，不受 profile 映射影响。服务、SLS 路由、PaaS 契约及其凭据均来自 Keychain 或私有配置文件，不读取环境变量。
+旧式不含 `profiles` 的扁平配置仅支持 `default`；使用其他 profile 时须在私有配置中建立对应的 `profiles.<name>`，以免路由与凭据混用。
+
+## 常见问题
+
+**依赖或配置失败？** 运行 `python3 scripts/setup.py --check --capability <能力>`，按错误补齐私有配置或 Keychain。
+
+**SLS 超时、权限失败或结果截断？** 先运行 `--doctor`，缩小范围；截断数据只能视为不完整证据。
+
+**SLS SDK 报 `TypeError` 或签名不匹配？** 核对安装依赖是否符合 `requirements.lock`，再用 `--doctor` 检查连接和索引；兼容问题解决前将其报告为采集失败，不把失败解释为无日志。
+
+**PaaS 返回结构无效？** 当前只支持上述固定响应包络；核对私有契约，勿将内部字段写入仓库。
+
+更多 Agent 路由与安全规则见 [SKILL.md](SKILL.md)、[SLS 分析计划](references/sls-analysis.md) 和 [行为评测说明](references/evaluation.md)。
