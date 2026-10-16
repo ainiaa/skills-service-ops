@@ -84,6 +84,17 @@ class ReadOnlyQueryTests(unittest.TestCase):
         self.assertTrue(db_export.is_export_query("SELECT id FROM orders LIMIT 10"))
         self.assertFalse(db_export.is_export_query("SELECT id FROM orders"))
 
+    def test_export_rejects_wildcard_projection_but_allows_count_star(self):
+        for sql in (
+            "SELECT * FROM orders LIMIT 10",
+            "SELECT orders.* FROM orders LIMIT 10",
+            "SELECT id FROM orders UNION SELECT * FROM archived_orders LIMIT 10",
+            "SELECT id FROM orders WHERE EXISTS (SELECT * FROM audit) LIMIT 10",
+        ):
+            with self.subTest(sql=sql):
+                self.assertFalse(db_export.is_export_query(sql))
+        self.assertTrue(db_export.is_export_query("SELECT COUNT(*) AS total FROM orders LIMIT 10"))
+
     def test_incident_query_requires_named_columns_and_a_small_limit(self):
         self.assertTrue(db_query.is_incident_query("SELECT id, status FROM orders LIMIT 10"))
         self.assertTrue(db_query.is_incident_query("SELECT price * quantity AS total FROM orders LIMIT 10"))
@@ -936,17 +947,11 @@ class DatabaseRoutingTests(unittest.TestCase):
             ("configured-project", "cn-hangzhou", None),
         )
 
-    def test_keychain_timeout_is_bounded_and_falls_back_to_private_config(self):
-        with patch.object(paas.platform, "system", return_value="Darwin"), \
-             patch.object(paas.subprocess, "run", side_effect=subprocess.TimeoutExpired("security", 10)) as run, \
+    def test_get_cookie_uses_private_config_without_reading_keychain(self):
+        config = {"paas": {"cookie": "configured-cookie"}}
+        with patch.object(paas, "_keychain_value", side_effect=AssertionError("不应读取钥匙串")), \
              patch.dict(os.environ, {"PAAS_COOKIE": "environment-cookie"}, clear=False):
-            self.assertEqual(paas.get_cookie(config={"paas": {"cookie": "configured-cookie"}}), "configured-cookie")
-        self.assertEqual(run.call_args.kwargs["timeout"], paas.KEYCHAIN_TIMEOUT_SECONDS)
-
-    def test_get_cookie_uses_the_requested_profile_keychain_entry(self):
-        with patch.object(paas, "_keychain_value", return_value="cookie") as keychain_value:
-            self.assertEqual(paas.get_cookie("regional", {"paas": {"cookie": "configured-cookie"}}), "cookie")
-        keychain_value.assert_called_once_with("paas-cookie", "regional")
+            self.assertEqual(paas.get_cookie("regional", config), "configured-cookie")
 
     def test_test_database_keychain_password_takes_precedence_over_private_config(self):
         with patch.object(paas, "_keychain_value", return_value="keychain-password"):
@@ -982,14 +987,16 @@ class DatabaseRoutingTests(unittest.TestCase):
                 return Response()
 
         config = {"services": {"orders": {"prod_db_group": "orders-db"}}, "paas": {
+            "cookie": "configured-cookie",
             "query_api_url": "https://example.invalid/query", "query_envs": {"prod": "production"},
             "query_contract": {"fields": {"group": "group", "env": "env", "sql": "sql", "limit": "limit"}},
         }}
         with patch.dict(sys.modules, {"requests": types.SimpleNamespace(RequestException=RequestException)}), \
-             patch.object(paas, "get_cookie", return_value="cookie"), \
+             patch.object(paas, "_keychain_value", side_effect=AssertionError("不应读取钥匙串")), \
              patch.object(paas, "build_session", return_value=Session()):
             self.assertEqual(paas.query(config, "orders", "prod", "SELECT id FROM orders LIMIT 10000", 10000)["rows"], [])
         self.assertEqual(captured["json"]["limit"], 10000)
+        self.assertEqual(captured["headers"]["cookie"], "configured-cookie")
 
     def test_test_database_route_is_available(self):
         self.assertTrue(callable(db_query.query_test))
@@ -1224,6 +1231,19 @@ class SetupTests(unittest.TestCase):
             self.assertEqual(setup.check_readiness("paas"), [])
         credentials.assert_not_called()
 
+    def test_check_readiness_can_check_only_the_requested_query_environment(self):
+        config = {"paas": {"query_api_url": "https://example.invalid/query",
+                           "query_envs": {"prod": "production"},
+                           "query_contract": {"fields": {
+                               "group": "database", "env": "environment",
+                               "sql": "statement", "limit": "max_rows",
+                           }}}}
+        with patch.object(paas, "load_config", return_value=config), \
+             patch.object(paas, "get_cookie", return_value="cookie"), \
+             patch.object(setup, "missing_dependencies", return_value=[]):
+            self.assertEqual(setup.check_readiness("export", environment="prod"), [])
+            self.assertEqual(setup.check_readiness("export"), ["PaaS 查询环境映射未配置：test。"])
+
     def test_check_readiness_checks_database_and_apply_requirements(self):
         config = {"test_db": {}, "paas": {}}
         with patch.object(paas, "load_config", return_value=config), \
@@ -1295,6 +1315,13 @@ class SetupTests(unittest.TestCase):
         self.assertEqual(exited.exception.code, 2)
         self.assertIn("--service 仅能与 --capability db 或 all 一起使用。", stderr.getvalue())
 
+    def test_setup_accepts_environment_for_readiness_check(self):
+        with patch.object(sys, "argv", ["setup.py", "--check", "--capability", "export", "--env", "prod"]), \
+             patch.object(setup, "check_readiness", return_value=[]) as check_readiness, \
+             redirect_stdout(io.StringIO()):
+            setup.main()
+        check_readiness.assert_called_once_with("export", None, None, "prod")
+
     def test_install_checks_requested_capability(self):
         with tempfile.TemporaryDirectory() as directory:
             bin_dir = Path(directory) / "bin"
@@ -1316,6 +1343,18 @@ class SetupTests(unittest.TestCase):
                                  "--capability", "unknown"], capture_output=True, text=True)
         self.assertEqual(result.returncode, 2)
         self.assertIn("用法：", result.stderr)
+
+    def test_install_syncs_skill_files_without_deleting_destination_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            destination = Path(directory) / "installed-skill"
+            destination.mkdir()
+            (destination / "local-note.txt").write_text("keep", encoding="utf-8")
+            result = subprocess.run(["bash", str(Path(__file__).parent.parent / "install.sh"),
+                                     "--sync-skill", str(destination)], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual((destination / "local-note.txt").read_text(encoding="utf-8"), "keep")
+            self.assertEqual((destination / "scripts" / "setup.py").read_text(encoding="utf-8"),
+                             (Path(__file__).parent / "setup.py").read_text(encoding="utf-8"))
 
     def test_install_checks_credentials_and_does_not_suggest_env_cookie(self):
         with tempfile.TemporaryDirectory() as directory:

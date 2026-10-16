@@ -1,4 +1,4 @@
-# 运行 `python3 scripts/setup.py --init` 会将本模板复制到 ~/.service-ops/config.yaml；请只填写该权限为 600 的私有文件。全部配置与凭据均保存在此处；macOS Keychain 中同名凭据优先于此文件。
+# 运行 `python3 scripts/setup.py --init` 会将本模板复制到 ~/.service-ops/config.yaml；请只填写该权限为 600 的私有文件。PaaS Cookie 从此文件读取；其他凭据按对应说明读取。
 profiles:
   default:
     paas:

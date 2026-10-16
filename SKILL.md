@@ -38,7 +38,7 @@ description: 对已配置服务执行 SLS 日志检索、TraceId 排障、趋势
 ## 共同边界
 
 1. 数据库验证、导出和变更所需的服务、目标环境（`prod`/`test`）、用途和 SQL 必须由用户明确提供；不得猜测服务、group 或目标环境。`profile` 选择配置/凭据集合，数据库 `--env` 选择目标环境，两者不是同一概念；`default` profile 不代表数据库生产或测试。日志、TraceId 与按服务执行的 DB/PaaS 操作未显式指定 profile 时，使用私有配置中的 `service_profile_mapping` 自动路由；没有映射时用 `default`；没有匹配项时先用可选 fallback，否则用 `default`。映射顺序是 exact、最长前缀、fallback；显式 `--profile` 优先，SLS 的 `--env` 兼容别名也按显式 profile 处理。未指定服务时仍须能从当前项目唯一映射或显式参数确定；在结果中说明最终服务与 profile。
-2. SLS、PaaS 与测试库的全部配置和凭据均只从权限为 `600` 的私有配置文件或 macOS Keychain（service=`service-ops`）读取；Keychain 中同 profile 的 `sls-ak`、`sls-sk`、`paas-cookie`、`test-db-password` 优先，配置文件兜底。Keychain 读取最多等待 10 秒，错误或超时后回退到同一 profile 的配置文件。禁止写入源码、命令行参数、环境变量或对话输出。
+2. SLS、PaaS 与测试库的配置和凭据均只从权限为 `600` 的私有配置文件或 macOS Keychain（service=`service-ops`）读取。PaaS Cookie 仅从当前 profile 的配置项 `paas.cookie` 读取，不访问 Keychain；测试库密码仍按同 profile 从 Keychain 优先、配置文件兜底。禁止写入源码、命令行参数、环境变量或对话输出。
 3. 生产查询、生产导出和任何变更工单都必须先得到用户明确授权。输出不得包含 Cookie、授权头或完整导出数据。SLS 日志默认原样输出，便于跟踪；用户明确要求脱敏时，才对日志和分析摘要使用 `--redact`。
 4. PaaS 失败属于证据或提交失败，不能当作空结果或成功；只报告可确认的结果。
 5. 工单操作不得由 Skill 的自动匹配、排障上下文或“处理一下”之类的隐含表达触发；必须由用户在当前请求中显式调用 `$skills-service-ops` 并说明提交、审批、立即执行或撤回的具体意图。
@@ -105,7 +105,7 @@ python3 <skill-dir>/scripts/db_apply.py \
 
 ## 配置
 
-运行 `python3 <skill-dir>/scripts/setup.py --init` 会创建用户私有配置 `~/.service-ops/config.yaml`，并设置权限为 `600`；SLS 的 project、region/endpoint、AK、SK，PaaS Cookie、HTTP 契约（请求头、端点、字段映射）、测试库密码和日志识别、脱敏正则都在这里。macOS Keychain 的同 profile 凭据优先，配置文件兜底；不读取环境变量。SLS 连接由内置 `sls_query.py --doctor` 检查。PaaS 查询成功响应固定为 `[{"columnList": [...], "rows": [...]}]`，其他响应结构暂不支持。脚本会拒绝读取权限过宽或格式无效的配置。每个可直连测试服务必须填写 `services.<service>.test_database`；测试库账号必须只拥有该配置库的最小权限。只使用日志时运行 `setup.py --check --capability sls`；生产查询运行 `paas`，测试库验证运行 `db`，导出运行 `export`，工单运行 `apply`；用 `setup.py --check --capability db --service <service>` 可提前验证该服务的测试库映射和密码；同时使用全部能力才使用默认 `all`。安装依赖前只检查，不自动安装。真实 SLS 查询仅支持 macOS 或 Unix 主线程；Windows 不在支持范围内：
+运行 `python3 <skill-dir>/scripts/setup.py --init` 会创建用户私有配置 `~/.service-ops/config.yaml`，并设置权限为 `600`；SLS 的 project、region/endpoint、AK、SK，PaaS Cookie、HTTP 契约（请求头、端点、字段映射）、测试库密码和日志识别、脱敏正则都在这里。PaaS Cookie 从配置项 `paas.cookie` 读取；测试库密码仍按同 profile 从 Keychain 优先、配置文件兜底；不读取环境变量。SLS 连接由内置 `sls_query.py --doctor` 检查。PaaS 查询成功响应固定为 `[{"columnList": [...], "rows": [...]}]`，其他响应结构暂不支持。脚本会拒绝读取权限过宽或格式无效的配置。每个可直连测试服务必须填写 `services.<service>.test_database`；测试库账号必须只拥有该配置库的最小权限。只使用日志时运行 `setup.py --check --capability sls`；生产查询运行 `paas`，测试库验证运行 `db`，导出运行 `export`，工单运行 `apply`；查询能力可用 `--env prod|test` 只校验对应 PaaS 环境映射；用 `setup.py --check --capability db --service <service>` 可提前验证该服务的测试库映射和密码；同时使用全部能力才使用默认 `all`。安装依赖前只检查，不自动安装。需要更新本地安装副本时运行 `install.sh --sync-skill <目标目录>`，该命令覆盖同名文件而保留目标中的其他文件。真实 SLS 查询仅支持 macOS 或 Unix 主线程；Windows 不在支持范围内：
 
 `requirements.txt` 只记录顶层依赖意图；安装与 CI 使用已解析的 `requirements.lock`。
 

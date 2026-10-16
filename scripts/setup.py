@@ -39,7 +39,7 @@ def missing_dependencies(capability="all"):
     return missing
 
 
-def check_readiness(capability="all", profile=None, service=None):
+def check_readiness(capability="all", profile=None, service=None, environment=None):
     missing = missing_dependencies(capability)
     errors = ["缺少 Python 依赖：{}".format(", ".join(missing))] if missing else []
     try:
@@ -61,14 +61,16 @@ def check_readiness(capability="all", profile=None, service=None):
     if capability in ("all", "paas", "export", "apply") and not paas.get_cookie(profile, config):
         errors.append("PaaS Cookie 未配置")
     if capability in ("all", "paas", "export") and config is not None:
-        errors.extend(paas.query_configuration_errors(config))
+        environments = (environment,) if environment else ("prod", "test")
+        errors.extend(paas.query_configuration_errors(config, environments))
     if capability in ("all", "db") and config is not None:
         database_errors = paas.test_database_configuration_errors(config, service)
         errors.extend(database_errors)
         if not database_errors and not paas.get_test_db_password(profile, config):
             errors.append("测试库密码未配置。")
     if capability in ("all", "apply") and config is not None:
-        errors.extend(paas.apply_configuration_errors(config))
+        environments = (environment,) if environment else ("prod", "test")
+        errors.extend(paas.apply_configuration_errors(config, environments))
     if capability in ("all", "sls") and config is not None:
         try:
             paas.log_analysis_rules(config)
@@ -89,11 +91,12 @@ def check_readiness(capability="all", profile=None, service=None):
 def main():
     parser = argparse.ArgumentParser(description="service-ops 本地配置初始化")
     parser.add_argument("--init", action="store_true", help="创建 ~/.service-ops/config.yaml")
-    parser.add_argument("--check", action="store_true", help="检查配置权限与 Keychain 凭据")
+    parser.add_argument("--check", action="store_true", help="检查配置权限与凭据")
     parser.add_argument("--capability", choices=("all", "paas", "sls", "db", "export", "apply"), default="all",
                         help="--check 的检查范围，默认 all")
     parser.add_argument("--profile", help="要检查的配置 profile，默认 default")
     parser.add_argument("--service", help="检查 db 时一并校验该服务的 test_database 映射")
+    parser.add_argument("--env", choices=("prod", "test"), help="只检查指定环境所需的 PaaS 配置")
     parser.add_argument("--check-dependencies", action="store_true", help="仅检查 Python 运行依赖")
     args = parser.parse_args()
     config = paas.CONFIG_PATH
@@ -118,7 +121,9 @@ def main():
         parser.error("请指定 --init、--check 或 --check-dependencies。")
     if args.service and args.capability not in ("all", "db"):
         parser.error("--service 仅能与 --capability db 或 all 一起使用。")
-    errors = check_readiness(args.capability, args.profile, args.service)
+    if args.env and args.capability not in ("all", "paas", "export", "apply"):
+        parser.error("--env 仅能与 --capability paas、export、apply 或 all 一起使用。")
+    errors = check_readiness(args.capability, args.profile, args.service, args.env)
     if errors:
         for error in errors:
             print(error)
