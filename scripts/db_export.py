@@ -14,7 +14,8 @@ _FORMULA_PREFIXES = ("=", "+", "-", "@")
 
 def is_export_query(sql):
     limit = paas.select_limit(sql)
-    return paas.is_read_only_select(sql) and limit is not None and limit <= MAX_EXPORT_ROWS
+    return (paas.is_read_only_select(sql) and not paas.has_wildcard_projection(sql)
+            and limit is not None and limit <= MAX_EXPORT_ROWS)
 
 
 def read_sql(sql, sql_file):

@@ -7,17 +7,19 @@
 ```bash
 python3 -m pip install -r requirements.lock
 python3 scripts/setup.py --init
-# 填写 ~/.service-ops/config.yaml（包括 Keychain 未提供的凭据）
+# 填写 ~/.service-ops/config.yaml
 python3 scripts/setup.py --check --capability sls
 ```
 
 `requirements.lock` 是日常安装与 CI 的完整锁定集，已在 Python 3.14/macOS 隔离环境验证。按需检查 `sls`、`paas`、`db`、`export`、`apply` 或全部能力 `all`；`apply` 就绪检查包含提交及审批、执行、撤回工单的端点。
 
+更新本地安装副本时，在源码目录运行 `bash install.sh --sync-skill "$HOME/.codex/skills/skills-service-ops"`；该命令覆盖同名 Skill 文件，不删除目标目录中的其他文件。就绪检查也可用 `--env prod` 或 `--env test` 只校验该环境的 PaaS 映射；省略时仍检查 prod 和 test。
+
 ## 配置与凭据
 
 `setup.py --init` 会从 [配置模板](config/settings.yaml.example) 创建权限为 `600` 的 `~/.service-ops/config.yaml`。填写 SLS 的 project/region/endpoint/AK/SK、服务的生产 group 与测试库、PaaS 契约和可选脱敏规则；SLS 日志默认原样输出，只有显式传 `--redact` 才使用这些规则。PaaS 查询成功响应固定为 `[{"columnList": [...], "rows": [...]}]`。
 
-全部配置与凭据均可填写在该私有文件中；macOS Keychain 的同 profile 凭据优先，配置文件作为兜底。当前不读取任何环境变量。
+PaaS Cookie 从该私有文件当前 profile 的 `paas.cookie` 读取；其他凭据按各自配置说明从私有文件或 macOS Keychain 读取。当前不读取任何环境变量。
 
 ## 常用场景
 
@@ -81,7 +83,7 @@ python3 scripts/db_apply.py --env prod --service orders \
 
 ### 使用 profile
 
-未指定 `--profile` 时，按私有配置中的可选 `service_profile_mapping` 选择 profile；`exact` 优先，其次匹配最长 `prefixes`，再用可选 `fallback`，均未命中时用 `default`。省略该映射即维持 `default`。映射对 SLS、DB/PaaS 按服务执行；TraceId 关联采集会为每个服务分别解析。显式 `--profile` 优先于映射；SLS 的 `--env` 兼容别名也按显式 profile 处理。profile 只能由字母、数字、`-`、`_` 构成并以字母开头；映射目标必须对应已配置的 `profiles.<name>`。示例见配置模板。数据库 `--env prod|test` 仍单独决定目标环境，不受 profile 映射影响。服务、SLS 路由、PaaS 契约及其凭据均来自 Keychain 或私有配置文件，不读取环境变量。
+未指定 `--profile` 时，按私有配置中的可选 `service_profile_mapping` 选择 profile；`exact` 优先，其次匹配最长 `prefixes`，再用可选 `fallback`，均未命中时用 `default`。省略该映射即维持 `default`。映射对 SLS、DB/PaaS 按服务执行；TraceId 关联采集会为每个服务分别解析。显式 `--profile` 优先于映射；SLS 的 `--env` 兼容别名也按显式 profile 处理。profile 只能由字母、数字、`-`、`_` 构成并以字母开头；映射目标必须对应已配置的 `profiles.<name>`。示例见配置模板。数据库 `--env prod|test` 仍单独决定目标环境，不受 profile 映射影响。PaaS Cookie 来自私有配置文件，其他服务配置和凭据按对应说明读取；不读取环境变量。
 旧式不含 `profiles` 的扁平配置仅支持 `default`；使用其他 profile 时须在私有配置中建立对应的 `profiles.<name>`，以免路由与凭据混用。
 
 ## 常见问题

@@ -150,9 +150,7 @@ def _configured_secret(config, section, field):
 
 
 def get_cookie(profile=None, config=None):
-    name = profile or active_profile()
-    return _keychain_value("paas-cookie", name) or _configured_secret(
-        config if config is not None else {}, "paas", "cookie")
+    return _configured_secret(config if config is not None else {}, "paas", "cookie")
 
 
 def get_test_db_password(profile=None, config=None):
@@ -432,7 +430,7 @@ def query(config, service, env, sql, limit=1000):
 
     cookie = get_cookie(config=config)
     if not cookie:
-        raise ValueError("未找到 PaaS Cookie；请写入 macOS Keychain 或私有配置文件。")
+        raise ValueError("未找到 PaaS Cookie；请填写私有配置文件中的 paas.cookie。")
     paas_config = config.get("paas", {})
     url = paas_config.get("query_api_url", "")
     if not url:

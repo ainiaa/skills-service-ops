@@ -4,10 +4,17 @@ set -euo pipefail
 SKILL_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 CAPABILITY="all"
 
-if [[ $# -eq 2 && $1 == "--capability" ]]; then
+if [[ $# -eq 2 && $1 == "--sync-skill" ]]; then
+  TARGET_DIR="$(mkdir -p -- "$2" && cd -- "$2" && pwd)"
+  if [[ "$TARGET_DIR" == "$SKILL_DIR" ]]; then
+    echo "同步目标不能是源码目录。" >&2
+    exit 2
+  fi
+  exec python3 "$SKILL_DIR/scripts/sync_skill.py" "$TARGET_DIR"
+elif [[ $# -eq 2 && $1 == "--capability" ]]; then
   CAPABILITY="$2"
 elif [[ $# -ne 0 ]]; then
-  echo "用法：$0 [--capability <all|paas|sls|db|export|apply>]" >&2
+  echo "用法：$0 [--capability <all|paas|sls|db|export|apply>] | --sync-skill <目标目录>" >&2
   exit 2
 fi
 
